@@ -1,0 +1,213 @@
+name: Auto-update PR branches (reusable)
+
+# Reusable shared workflow consumed by every containment-ai repo's
+# .github/workflows/auto-update-pr-branches.yml shim. The shim owns the
+# triggers (push:main + schedule:*/30 + workflow_dispatch); this file
+# owns the executable logic.
+#
+# Source-of-truth consolidation: containment-ai/containment-ai-agents#1160.
+# History: copy-pasted into 5–6 repos on 2026-05-19, then required 6
+# hot-fixes (#1118, #1119, #1124, #1125, #1126, #1127) plus per-repo
+# ports. This shared workflow makes future fixes propagate via `uses:`
+# instead of N× copy-paste churn.
+#
+# Behavior: for each open PR that is BEHIND main and meets eligibility
+# (CI green or pending, not CHANGES_REQUESTED, not draft, not labeled
+# do-not-merge / wip), calls `gh pr update-branch` so the PR's CI
+# re-runs against the new merged-with-main commit. After a successful
+# rebase, pushes an empty commit via the PAT so `pull_request:
+# synchronize` actually fires (GitHub anti-recursion otherwise leaves
+# the bot-authored merge commit with zero CI runs — verified across
+# PRs #1837-1840 on 2026-06-05).
+#
+# Triggers must live in the caller, not here, because `workflow_call`
+# workflows cannot declare push/schedule/workflow_dispatch triggers.
+
+on:
+  workflow_call:
+    secrets:
+      CLAUDE_BOT_PR_TOKEN:
+        description: >-
+          PAT used ONLY for the empty-commit push that forces
+          pull_request:synchronize after a successful rebase.
+          GITHUB_TOKEN-authored pushes don't fire synchronize
+          (GitHub anti-recursion), so the empty commit lands but CI
+          stays silent — leaving PRs BLOCKED. A real-user PAT push
+          fires CI normally. Optional: falls back to github.token if
+          unset (degrades to the pre-#1834 broken-by-design behavior,
+          no worse).
+        required: false
+
+# Single concurrent run per caller — if multiple merges land in quick
+# succession, only the latest needs to run; intermediate states are
+# stale by the time they'd start.
+concurrency:
+  group: auto-update-prs-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rebase-eligible:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      statuses: read
+      actions: read
+    steps:
+      - name: Rebase all BEHIND + green + auto-merge-armed PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_BOT_TOKEN: ${{ secrets.CLAUDE_BOT_PR_TOKEN || github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # After a push to main, every open PR's mergeStateStatus is
+          # invalidated and recomputed asynchronously. Recompute can take
+          # anywhere from ~30s to several minutes for a repo with many
+          # open PRs (~90 on containment-ai-agents). If we query too
+          # early the workflow sees mostly UNKNOWN, treats them as
+          # ineligible, and silently exits — meaning the BEHIND queue
+          # never drains. Empirically: a single 30s sleep was not enough
+          # (run 26102616589, post-#1123 merge, queried at t+43s and
+          # found 0 eligible when ~40 actually qualified; by t+~11min
+          # state had settled).
+          #
+          # So we poll: up to 6 times with 30s gaps. Worst-case wait is
+          # ~3 min. The concurrency.cancel-in-progress kills superseded
+          # runs.
+          #
+          # Note: deliberately NOT requesting `statusCheckRollup`. That
+          # field forces GitHub's GraphQL backend to materialize check
+          # suites + workflow runs for every PR's head commit, and with
+          # ~90 open PRs the query consistently 502s when called by the
+          # workflow's GITHUB_TOKEN. `mergeStateStatus == "BEHIND"`
+          # already excludes PRs blocked by failing required checks
+          # (those report BLOCKED), and the auto-merge-armed gate means
+          # the author has signed off on merge.
+
+          # GitHub's GraphQL endpoint intermittently returns 502 on this
+          # query even at the lighter shape. With `set -euo pipefail` an
+          # uncaught 502 kills the whole loop, so we tolerate it
+          # explicitly: if gh exits non-zero we treat the attempt as "no
+          # data, retry next iteration".
+          #
+          # We collect the UNION of eligible PRs across all attempts
+          # rather than breaking on the first non-empty result. Reason:
+          # GitHub's mergeStateStatus recompute is per-PR and not atomic,
+          # so a snapshot at t+30s may have 5 PRs settled to BEHIND and
+          # 35 still UNKNOWN. Breaking there would rebase only the 5 and
+          # leave the rest stuck until the next main push.
+          eligible_file=$(mktemp)
+          trap 'rm -f "$eligible_file"' EXIT
+          for attempt in 1 2 3 4 5 6; do
+            prs=$(gh pr list --repo "$REPOSITORY" --state open --limit 100 \
+              --json number,isDraft,labels,mergeStateStatus,autoMergeRequest 2>/dev/null) || prs=""
+
+            if [ -z "$prs" ] || [ "${prs:0:1}" != "[" ]; then
+              echo "::notice::Attempt $attempt: gh pr list failed (transient API error) — retrying after 30s."
+              [ $attempt -lt 6 ] && sleep 30
+              continue
+            fi
+
+            this_attempt=$(echo "$prs" | jq -r '
+              .[] |
+              select(.isDraft == false) |
+              select(.mergeStateStatus == "BEHIND") |
+              select(.autoMergeRequest != null) |
+              select(([.labels[]?.name] | any(. == "do-not-merge" or . == "wip")) | not) |
+              .number
+            ')
+
+            count_this=$(echo "$this_attempt" | grep -c . || true)
+            echo "::notice::Attempt $attempt: $count_this eligible PR(s) in this snapshot."
+
+            if [ -n "$this_attempt" ]; then
+              echo "$this_attempt" >> "$eligible_file"
+            fi
+
+            if [ $attempt -lt 6 ]; then sleep 30; fi
+          done
+
+          # Union across all attempts (sort -u removes duplicates).
+          eligible=$(sort -un "$eligible_file" 2>/dev/null || true)
+
+          if [ -z "$eligible" ]; then
+            echo "::notice::No BEHIND + green + auto-merge-armed PRs to rebase after 6 attempts."
+            exit 0
+          fi
+
+          echo "::notice::Union of eligible PRs across all attempts: $(echo "$eligible" | wc -l | tr -d ' ') PR(s)."
+
+          count=0
+          rebased=()
+          failed=()
+          for pr in $eligible; do
+            # Cap at 20 rebases per run — keeps the workflow under the
+            # 10-min budget and prevents one chaotic merge wave from
+            # monopolizing it.
+            if [ $count -ge 20 ]; then
+              echo "::warning::Cap reached (20 rebases). Remaining PRs will be picked up on the next main push."
+              break
+            fi
+            # Retry update-branch up to 3x — transient 502s on
+            # individual PR rebases shouldn't waste a slot.
+            success=0
+            for try in 1 2 3; do
+              if gh pr update-branch "$pr" --repo "$REPOSITORY" 2>/dev/null; then
+                success=1
+                break
+              fi
+              [ $try -lt 3 ] && sleep 3
+            done
+            if [ $success -eq 1 ]; then
+              rebased+=("#$pr")
+
+              # ── Force `pull_request: synchronize` after rebase (issue #1819) ──
+              # `gh pr update-branch` creates a merge commit authored by
+              # github-actions[bot]. GitHub does NOT fire workflow runs
+              # for these merge commits on their own SHA (verified across
+              # ~10 PRs in 2026-06-04/05). The PR sits BLOCKED
+              # indefinitely because required-status-checks see no checks
+              # on HEAD.
+              #
+              # Workaround: append an empty commit via the Contents API,
+              # authored via a PAT (GH_BOT_TOKEN — see env block above).
+              # A push authored by a real-user PAT fires `synchronize`; a
+              # push authored by github-actions[bot] does not (GitHub
+              # anti-recursion). First attempt at this fix (PR #1834)
+              # used the workflow's GITHUB_TOKEN for the empty-commit
+              # push and produced bot-authored single-parent commits with
+              # zero CI runs — verified across PRs #1837-1840 on
+              # 2026-06-05.
+              #
+              # The PAT only needs contents:write + pull-requests:write
+              # on the caller repo. Falls back to github.token if the
+              # secret is unset (no worse than the prior pre-#1834
+              # state).
+              if branch=$(gh pr view "$pr" --repo "$REPOSITORY" --json headRefName --jq .headRefName 2>/dev/null) && [ -n "$branch" ]; then
+                if ref_data=$(GH_TOKEN="$GH_BOT_TOKEN" gh api "repos/$REPOSITORY/git/refs/heads/$branch" 2>/dev/null) && parent_sha=$(echo "$ref_data" | jq -r '.object.sha') && [ -n "$parent_sha" ] && [ "$parent_sha" != "null" ]; then
+                  if tree_sha=$(GH_TOKEN="$GH_BOT_TOKEN" gh api "repos/$REPOSITORY/git/commits/$parent_sha" --jq '.tree.sha' 2>/dev/null) && [ -n "$tree_sha" ] && [ "$tree_sha" != "null" ]; then
+                    if new_sha=$(GH_TOKEN="$GH_BOT_TOKEN" gh api "repos/$REPOSITORY/git/commits" -f message="ci: force synchronize after auto-update rebase (issue #1819)" -f tree="$tree_sha" -f "parents[]=$parent_sha" --jq '.sha' 2>/dev/null) && [ -n "$new_sha" ] && [ "$new_sha" != "null" ]; then
+                      if GH_TOKEN="$GH_BOT_TOKEN" gh api -X PATCH "repos/$REPOSITORY/git/refs/heads/$branch" -f sha="$new_sha" >/dev/null 2>&1; then
+                        echo "::notice::PR #$pr — pushed empty commit ${new_sha:0:8} via PAT to force CI synchronize"
+                      else
+                        echo "::warning::PR #$pr — empty-commit ref update failed; PR may remain BLOCKED until next push"
+                      fi
+                    else
+                      echo "::warning::PR #$pr — empty-commit creation failed; PR may remain BLOCKED"
+                    fi
+                  fi
+                fi
+              fi
+            else
+              failed+=("#$pr")
+            fi
+            count=$((count+1))
+          done
+
+          echo "::notice::Rebased ${#rebased[@]} PR(s): ${rebased[*]:-(none)}"
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::warning::Failed to rebase ${#failed[@]} PR(s) (likely conflicts): ${failed[*]}"
+          fi
