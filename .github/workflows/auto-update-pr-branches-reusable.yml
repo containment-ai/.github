@@ -63,6 +63,61 @@ jobs:
         run: |
           set -euo pipefail
 
+          # ── Thrash guard (2026-06-13 merge-logjam root cause) ────────────
+          # Background: this workflow rebases every BEHIND + auto-merge-armed
+          # PR on every main push AND every 30 min. That is ONLY correct when
+          # the branch requires PRs to be up-to-date before merge ("strict"
+          # required status checks). If strict is OFF, a BEHIND-but-MERGEABLE
+          # PR with green required checks merges WITHOUT a rebase — so
+          # rebasing it is pure harm: each `gh pr update-branch` + the
+          # empty-commit push below resets all required checks to `pending`
+          # and re-queues CI. With many armed PRs that re-queue never settles
+          # to green before the next 30-min wave → checks never go green →
+          # GitHub auto-merge never fires. That is the merge logjam.
+          #
+          # Two distinct hazards, two fixes:
+          #   1. THRASH (rebasing PRs that didn't need it). Fixed by gating
+          #      the BEHIND rebase on the branch's strict flag below: skip
+          #      BEHIND-only rebases when strict is OFF.
+          #   2. HERD (rebasing N PRs at once even when strict IS on, so all
+          #      N reset CI simultaneously and saturate the runners). Fixed
+          #      by the per-run cap (lowered 20→5 further down) so each wave
+          #      brings a small batch to green before the next wave starts.
+          #
+          # IMPORTANT — read strict from the RULESET API, not just classic
+          # branch protection. On containment-ai-agents, classic
+          # `branches/main/protection/required_status_checks .strict` returns
+          # FALSE, but the branch is actually governed by a *ruleset* whose
+          # `required_status_checks.parameters.strict_required_status_checks_policy`
+          # is TRUE. Reading only the classic API would wrongly conclude
+          # strict=false and skip genuinely-necessary rebases. We OR the two
+          # sources: strict is ON if EITHER reports it on. Fail SAFE: if both
+          # queries error/return nothing, default to strict=ON (rebase) — the
+          # pre-fix behavior, never worse than today. (All consumers of this
+          # reusable workflow target `main` as their default branch.)
+          STRICT="unknown"
+          # 1. Rulesets API (active rules merged from all rulesets on the branch).
+          ruleset_strict=$(gh api "repos/$REPOSITORY/rules/branches/main" \
+            --jq '[.[] | select(.type=="required_status_checks") | .parameters.strict_required_status_checks_policy] | any' 2>/dev/null || echo "")
+          # 2. Classic branch protection (separate mechanism; either can be in force).
+          classic_strict=$(gh api "repos/$REPOSITORY/branches/main/protection/required_status_checks" \
+            --jq '.strict' 2>/dev/null || echo "")
+          if [ "$ruleset_strict" = "true" ] || [ "$classic_strict" = "true" ]; then
+            STRICT="true"
+          elif [ "$ruleset_strict" = "false" ] || [ "$classic_strict" = "false" ]; then
+            # At least one source answered and neither said true → strict is OFF.
+            STRICT="false"
+          else
+            # Neither query yielded a usable answer → fail SAFE to rebase.
+            STRICT="true"
+          fi
+          echo "::notice::Branch strict required_status_checks = $STRICT (ruleset=$ruleset_strict classic=$classic_strict)."
+
+          if [ "$STRICT" = "false" ]; then
+            echo "::notice::strict=false — BEHIND+MERGEABLE PRs merge on green WITHOUT a rebase. Skipping BEHIND-only rebases to avoid CI thrash. (Real conflicts surface as DIRTY/CONFLICTING and are handled by author/conflict workflows, not here.)"
+            exit 0
+          fi
+
           # After a push to main, every open PR's mergeStateStatus is
           # invalidated and recomputed asynchronously. Recompute can take
           # anywhere from ~30s to several minutes for a repo with many
@@ -144,11 +199,17 @@ jobs:
           rebased=()
           failed=()
           for pr in $eligible; do
-            # Cap at 20 rebases per run — keeps the workflow under the
-            # 10-min budget and prevents one chaotic merge wave from
-            # monopolizing it.
-            if [ $count -ge 20 ]; then
-              echo "::warning::Cap reached (20 rebases). Remaining PRs will be picked up on the next main push."
+            # Cap at 5 rebases per run (HERD throttle, lowered 20→5
+            # 2026-06-13 per merge-logjam root cause). Even when strict=true
+            # makes the rebase necessary, rebasing a large batch at once
+            # resets ALL their required checks to pending simultaneously and
+            # saturates the CI runners → none reach green before the next
+            # 30-min wave re-rebases them → logjam. A small batch lets each
+            # wave bring ≤5 PRs to green (and merge) before the next wave
+            # starts, serializing the queue instead of perpetually resetting
+            # it. Remaining PRs are picked up on the next push/schedule.
+            if [ $count -ge 5 ]; then
+              echo "::warning::Cap reached (5 rebases/run — herd throttle). Remaining PRs picked up on the next main push or */30 schedule."
               break
             fi
             # Retry update-branch up to 3x — transient 502s on
