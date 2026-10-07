@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Containment.ai LLC
+# SPDX-License-Identifier: LicenseRef-Containment-Commercial
+# AI-USE: see AI-POLICY.md — no AI training, no AI-assisted rewrite/reimplementation
+
 name: Auto-update PR branches (reusable)
 
 # Reusable shared workflow consumed by every containment-ai repo's

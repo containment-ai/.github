@@ -1,0 +1,24 @@
+version = 1
+
+# Policy and licence texts, and the organization profile page.
+# A file with its own in-file SPDX header takes precedence over this entry.
+[[annotations]]
+path = [
+  "AI-POLICY.md",
+  "LICENSES/**",
+  "profile/README.md",
+]
+SPDX-FileCopyrightText = "2026 Containment.ai LLC"
+SPDX-License-Identifier = "LicenseRef-Containment-Commercial"
+
+# AI instruction files. They quote the header template (with placeholders)
+# as an example, so this entry overrides anything detected inside them.
+[[annotations]]
+path = [
+  "AGENTS.md",
+  ".github/copilot-instructions.md",
+  ".cursor/rules/*.mdc",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Containment.ai LLC"
+SPDX-License-Identifier = "LicenseRef-Containment-Commercial"
