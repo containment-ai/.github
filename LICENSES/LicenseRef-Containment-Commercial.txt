@@ -1,0 +1,36 @@
+[DRAFT — SUBJECT TO COUNSEL REVIEW. Remove this line once counsel has approved the text.]
+
+Containment.ai LLC Commercial Licence (LicenseRef-Containment-Commercial)
+
+Copyright (c) Containment.ai LLC. All rights reserved.
+
+1. No licence without agreement. This software, its source code and its documentation
+   (the "Software") are proprietary to Containment.ai LLC ("Company"). You may use,
+   copy, modify or distribute the Software only under, and only as permitted by, a
+   separate written agreement signed by Company. Absent such an agreement, no right to
+   use the Software is granted.
+
+2. Confidentiality. The Software contains Company's trade secrets and confidential
+   information. You must keep it confidential, protect it with at least reasonable care,
+   and disclose it only as your written agreement with Company allows.
+
+3. No reverse engineering. You may not reverse engineer, decompile or disassemble the
+   Software, or attempt to derive its source code, design or algorithms, except to the
+   extent applicable law expressly permits despite this restriction.
+
+4. AI Use Policy. The Containment.ai AI Use Policy (AI-POLICY.md, distributed with the
+   Software) is incorporated into this licence and is a binding term of it. Use of the
+   Software in breach of that policy is use outside this licence.
+
+5. Reservation of rights. All rights not expressly granted in a signed written agreement
+   are reserved by Company. No other right or licence is granted, by implication,
+   estoppel or otherwise.
+
+6. Third-party components. Third-party components included with the Software remain
+   under their own licences, which this licence does not change.
+
+7. Conflicts. If this notice conflicts with your signed written agreement with Company,
+   the signed agreement controls.
+
+Contact: legal@containment.ai — Containment.ai LLC, 10001 Georgetown Pike, #384,
+Great Falls, VA 22066, USA.
