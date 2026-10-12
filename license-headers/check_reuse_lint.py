@@ -28,6 +28,7 @@ Install: pip install --require-hashes -r <that lock file>
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import subprocess
@@ -60,9 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     cmd = shlex.split(args.reuse_cmd) if args.reuse_cmd else [sys.executable, "-m", "reuse"]
     root = str(Path(args.root).resolve())
+    # The verdict line is English; pin the locale so it does not depend on the
+    # shell (reuse ships translations).
+    env = {**os.environ, "LC_ALL": "C", "LANG": "C", "LANGUAGE": "en"}
 
     try:
-        ver = subprocess.run(cmd + ["--version"], capture_output=True, text=True, timeout=120)
+        ver = subprocess.run(cmd + ["--version"], capture_output=True, text=True, timeout=120, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"check_reuse_lint: ERROR: cannot run reuse ({exc}). Install it: {install_hint()}", file=sys.stderr)
         return 2
@@ -82,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        lint = subprocess.run(cmd + ["--root", root, "lint"], capture_output=True, text=True, timeout=1800)
+        lint = subprocess.run(cmd + ["--root", root, "lint"], capture_output=True, text=True, timeout=1800, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"check_reuse_lint: ERROR: reuse lint did not complete ({exc})", file=sys.stderr)
         return 2

@@ -23,10 +23,11 @@ Repository-agnostic. Everything repository-specific comes from two places:
     expression, the AI-USE form for AGPL files, extra exempt globs, and the
     path of the baseline file.
   * The repository's own `REUSE.toml`. The EXPECTED licence expression of a
-    file is what REUSE.toml's last matching `precedence = "override"`
-    annotation assigns it, else the configured default. Annotations whose
-    copyright does not name the holder mark THIRD-PARTY paths. This checker
-    adds no tier map of its own: the tiers stay where `reuse lint` reads them.
+    file is the expression of the LAST REUSE.toml annotation matching it (any
+    precedence; REUSE 3.3 applies only that one), else the configured default.
+    An annotation naming any copyright holder besides ours marks the path
+    THIRD-PARTY. This checker adds no tier map of its own: the tiers stay
+    where `reuse lint` reads them.
 
 Finding codes (each is proven able to fire by scripts/test_check_headers.py):
 
@@ -42,6 +43,8 @@ Finding codes (each is proven able to fire by scripts/test_check_headers.py):
   H008  a second copyright or licence tag line in the header window
   H009  baseline entry is stale: the file is gone, or no longer has that finding
   H010  baseline entry names an unknown code or is malformed
+  H011  baseline grew: an entry absent from the baseline at the comparison
+        ref (--no-growth-against REF)
 
 Files the gate does not inspect (counted and printed, never silent):
   * binary files; JSON/JSONC/JSON5/JSONL; lockfiles; licence texts; the
@@ -56,7 +59,10 @@ any OTHER finding on the same file still fires, so a baseline entry is not an
 exemption. The baseline only shrinks: an entry that no longer matches a real
 finding is itself a finding (H009), so a fixed file must also leave the list.
 `--write-baseline` regenerates it from the current tree; review that diff, it
-is the only way to grow the list.
+is the only way to grow the list, and with --no-growth-against REF (how the
+gate runs) an entry REF's baseline lacks is H011, unless this script or its
+config also changed since REF (a rule change may legitimately surface old
+files; the growth is then printed).
 
 Exit codes: 0 = no findings; 1 = at least one finding (each printed);
 2 = inputs could not be read.
@@ -103,6 +109,7 @@ CODES = {
     "H008": "duplicate copyright or licence line",
     "H009": "stale baseline entry",
     "H010": "malformed baseline entry",
+    "H011": "baseline grew",
 }
 
 # Files covered by REUSE.toml instead of an inline header (HEADER-SPEC section 5).
@@ -175,7 +182,6 @@ class Config:
 @dataclass
 class Annotation:
     patterns: list[re.Pattern]
-    precedence: str
     copyright: str
     expression: str
 
@@ -250,7 +256,6 @@ def load_annotations(root: Path, files: list[str]) -> list[Annotation]:
             expr = " AND ".join(f"({e})" if " " in str(e).strip() else str(e) for e in expr)
         out.append(Annotation(
             patterns=[reuse_glob(p) for p in paths],
-            precedence=ann.get("precedence", "closest"),
             copyright=cr,
             expression=str(expr),
         ))
@@ -259,6 +264,10 @@ def load_annotations(root: Path, files: list[str]) -> list[Annotation]:
 
 _YEARS_RE = re.compile(r"\b\d{4}(?:\s*-\s*\d{4})?\b")
 _JOINERS_RE = re.compile(r"[,;&()]|\band\b", re.IGNORECASE)
+# Notice words are not holders: "Copyright (C) 2026 Containment.ai LLC" names
+# only us. Without this, the word "Copyright" would read as another holder and
+# silently switch a first-party path to the third-party rules.
+_NOTICE_RE = re.compile(r"SPDX-FileCopyrightText:|\bcopyright\b|\(c\)|©", re.IGNORECASE)
 
 
 def names_other_holder(copyright_text: str, holder: str) -> bool:
@@ -269,7 +278,7 @@ def names_other_holder(copyright_text: str, holder: str) -> bool:
     it. Our holder, years and joining words are removed; anything left is
     another holder."""
     for line in copyright_text.splitlines():
-        rest = _JOINERS_RE.sub(" ", _YEARS_RE.sub(" ", line.replace(holder, " ")))
+        rest = _JOINERS_RE.sub(" ", _YEARS_RE.sub(" ", _NOTICE_RE.sub(" ", line.replace(holder, " "))))
         if any(ch.isalpha() for ch in rest):  # Unicode-aware: any script names a holder
             return True
     return False
@@ -340,7 +349,7 @@ def read_baseline(root: Path, cfg: Config, report: Report, writing: bool = False
         if not line or line.startswith("#"):
             continue
         parts = line.split(None, 1)
-        if len(parts) != 2 or parts[0] not in CODES or parts[0] in ("H009", "H010"):
+        if len(parts) != 2 or parts[0] not in CODES or parts[0] in ("H009", "H010", "H011"):
             report.findings.append(("H010", cfg.baseline, f"line {n}: {raw!r}"))
             continue
         entries.add((parts[0], parts[1]))
@@ -372,12 +381,22 @@ def glob_match(path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def commentable(path: str) -> bool:
+def commentable(path: str, root: Path | None = None) -> bool:
     name = path.rsplit("/", 1)[-1]
     if name in COMMENT_NAMES or name.startswith("Dockerfile.") or name.lower() in COMMENT_EXT:
         return True  # the last arm: an extension-like dotfile name such as `.env`
     dot = name.rfind(".")
-    return dot > 0 and name[dot:].lower() in COMMENT_EXT
+    if dot > 0 and name[dot:].lower() in COMMENT_EXT:
+        return True
+    if root is not None and dot <= 0:
+        # An extensionless script (a git hook, a bin/ wrapper) can carry a `#`
+        # header: treat a shebang as comment syntax.
+        try:
+            with (root / path).open("rb") as fh:
+                return fh.read(2) == b"#!"
+        except OSError:
+            return True  # let the reader raise the InputError
+    return False
 
 
 def head_lines(path: Path, rel: str) -> tuple[list[str], bool] | None:
@@ -433,8 +452,8 @@ def inspect(lines: list[str], expected: str, third_party: bool, cfg: Config) -> 
 
     if legacy:
         found.append(("H006", f"line {legacy[0] + 1}: {lines[legacy[0]].strip()[:80]!r}"))
-    if len(copies) > 1 or len(lics) > 1:
-        found.append(("H008", f"{len(copies)} copyright and {len(lics)} licence lines"))
+    if len(copies) > 1 or len(lics) > 1 or len(ais) > 1:
+        found.append(("H008", f"{len(copies)} copyright, {len(lics)} licence and {len(ais)} AI-USE lines"))
     if not copies and not lics and not ais:
         if not legacy:
             found.append(("H001", "no SPDX-FileCopyrightText, SPDX-License-Identifier or AI-USE line"))
@@ -468,7 +487,7 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
         if cfg.exempt and glob_match(rel, cfg.exempt):
             report.skip(f"exempt glob in {CONFIG_NAME}")
             continue
-        if not commentable(rel):
+        if not commentable(rel, root):
             report.skip("no known comment syntax")
             continue
         sidecar = rel + ".license"
@@ -500,6 +519,47 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
     return report, sorted(current)
 
 
+def baseline_growth(root: Path, cfg: Config, ref: str, report: Report) -> None:
+    """H011 for each baseline entry the baseline at `ref` lacks."""
+    if not cfg.baseline:
+        return
+    git = ["git", "-C", str(root)]
+    shown = subprocess.run(git + ["show", f"{ref}:{cfg.baseline}"], capture_output=True)
+    if shown.returncode != 0:
+        exists = subprocess.run(git + ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], capture_output=True)
+        if exists.returncode != 0:
+            raise InputError(f"--no-growth-against: {ref!r} is not a commit")
+        print(f"check_headers: no baseline at {ref}; growth check skipped (first adoption)")
+        return
+    def entries(text: str) -> set[tuple[str, str]]:
+        out = set()
+        for line in text.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2 and not parts[0].startswith("#"):
+                out.add((parts[0], parts[1]))
+        return out
+    before = entries(shown.stdout.decode("utf-8", "replace"))
+    now = entries((root / cfg.baseline).read_text(encoding="utf-8"))
+    grown = sorted(now - before)
+    if not grown:
+        return
+    script = Path(__file__).resolve()
+    rules = [CONFIG_NAME]
+    try:
+        rules.append(str(script.relative_to(root.resolve())))
+    except ValueError:
+        pass  # the script lives outside the checked repository (org workflow)
+    changed = subprocess.run(git + ["diff", "--quiet", ref, "--", *rules], capture_output=True)
+    if changed.returncode == 1:
+        print(f"check_headers: baseline grew by {len(grown)} entr{'y' if len(grown) == 1 else 'ies'} "
+              f"since {ref}, allowed because {' or '.join(rules)} changed too:")
+        for code, rel in grown:
+            print(f"  + {code} {rel}")
+        return
+    for code, rel in grown:
+        report.findings.append(("H011", rel, f"baseline {code} is new since {ref}; fix the file instead"))
+
+
 def write_baseline(root: Path, current: list[tuple[str, str]]) -> Path:
     cfg = load_config(root)
     if not cfg.baseline:
@@ -526,6 +586,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", default=".", help="repository root (default: .)")
     ap.add_argument("--write-baseline", action="store_true",
                     help="rewrite the baseline from the current findings, then exit 0")
+    ap.add_argument("--no-growth-against", metavar="REF", default=None,
+                    help="fail (H011) on baseline entries absent from the baseline at REF")
     args = ap.parse_args(argv)
     root = Path(args.root).resolve()
     try:
@@ -533,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.write_baseline:
             print(f"check_headers: wrote {len(current)} entries to {write_baseline(root, current)}")
             return 0
+        if args.no_growth_against:
+            baseline_growth(root, load_config(root), args.no_growth_against, report)
     except InputError as exc:
         print(f"check_headers: ERROR: {exc}", file=sys.stderr)
         return 2
