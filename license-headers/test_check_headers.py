@@ -359,6 +359,30 @@ SPDX-License-Identifier = "{COMM}"
         self.assertEqual(self.run_checker().returncode, 2)
 
 
+class RoundThreeRegressions(Fixture):
+    def test_string_exempt_exits_2(self) -> None:
+        self.write(".license-headers.toml", CONFIG.format(form="d25").replace('exempt = ["records/**"]', 'exempt = "records/**"'))
+        self.assertEqual(self.run_checker().returncode, 2)
+
+    def test_non_latin_holder_is_third_party(self) -> None:
+        self.write("REUSE.toml", REUSE + """
+[[annotations]]
+path = "vendor/jp/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2024 株式会社"
+SPDX-License-Identifier = "MIT"
+""")
+        self.write("vendor/jp/lib.js", "// " + AI + "\nmodule.exports = 4;\n")
+        self.assertFinding("H007", "vendor/jp/lib.js")
+
+    def test_write_baseline_creates_a_missing_baseline(self) -> None:
+        (self.root / "baseline.txt").unlink()
+        self.write("src/new.rs", "fn new() {}\n")
+        r = self.run_checker("--write-baseline")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("H001 src/new.rs", (self.root / "baseline.txt").read_text())
+
+
 class Baseline(Fixture):
     def test_baselined_finding_is_excused(self) -> None:
         self.write("src/new.rs", "fn new() {}\n")

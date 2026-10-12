@@ -265,7 +265,7 @@ def names_other_holder(copyright_text: str, holder: str) -> bool:
     another holder."""
     for line in copyright_text.splitlines():
         rest = _JOINERS_RE.sub(" ", _YEARS_RE.sub(" ", line.replace(holder, " ")))
-        if re.search(r"[A-Za-z]", rest):
+        if any(ch.isalpha() for ch in rest):  # Unicode-aware: any script names a holder
             return True
     return False
 
@@ -303,21 +303,31 @@ def load_config(root: Path) -> Config:
     form = data.get("agpl-ai-use", "d25")
     if form not in ("d25", "notice"):
         raise InputError(f'{CONFIG_NAME}: agpl-ai-use must be "d25" or "notice", got {form!r}')
+    exempt = data.get("exempt", [])
+    if not isinstance(exempt, list) or not all(isinstance(g, str) and g for g in exempt):
+        # A bare string would become one-character globs, including "*",
+        # which exempts every file: refuse rather than fail open.
+        raise InputError(f"{CONFIG_NAME}: exempt must be an array of non-empty strings")
+    baseline = data.get("baseline", "")
+    if not isinstance(baseline, str):
+        raise InputError(f"{CONFIG_NAME}: baseline must be a string path")
     return Config(
         years=str(data["years"]),
         holder=str(data["holder"]),
         default_expression=str(data["default-expression"]),
         agpl_ai_use=form,
-        exempt=tuple(data.get("exempt", [])),
-        baseline=str(data.get("baseline", "")),
+        exempt=tuple(exempt),
+        baseline=baseline,
     )
 
 
-def read_baseline(root: Path, cfg: Config, report: Report) -> set[tuple[str, str]]:
+def read_baseline(root: Path, cfg: Config, report: Report, writing: bool = False) -> set[tuple[str, str]]:
     entries: set[tuple[str, str]] = set()
     if not cfg.baseline:
         return entries
     path = root / cfg.baseline
+    if not path.is_file() and writing:
+        return entries  # --write-baseline is about to create it (first adoption)
     if not path.is_file():
         raise InputError(f"baseline {cfg.baseline} named in {CONFIG_NAME} does not exist")
     for n, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -438,10 +448,10 @@ def inspect(lines: list[str], expected: str, third_party: bool, cfg: Config) -> 
     return found
 
 
-def run(root: Path) -> tuple[Report, list[tuple[str, str]]]:
+def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]]]:
     cfg = load_config(root)
     report = Report()
-    baseline = read_baseline(root, cfg, report)
+    baseline = read_baseline(root, cfg, report, writing)
     files = tracked_files(root)
     annotations = load_annotations(root, files)
     tracked = set(files)
@@ -514,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     root = Path(args.root).resolve()
     try:
-        report, current = run(root)
+        report, current = run(root, writing=args.write_baseline)
         if args.write_baseline:
             print(f"check_headers: wrote {len(current)} entries to {write_baseline(root, current)}")
             return 0
