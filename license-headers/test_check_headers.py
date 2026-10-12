@@ -488,6 +488,42 @@ SPDX-License-Identifier = "LicenseRef-Containment-Commercial"
         self.assertFinding("H010", "baseline.txt")
 
 
+class RoundFiveRegressions(Fixture):
+    """Codex + Claude review of #2445 at 9f88612a (follow-up PR)."""
+
+    def test_h006_standalone_all_rights_reserved_line(self) -> None:
+        # A D25 header followed by a separate rights-reservation line keeps the
+        # prohibited pre-D25 marking even though no single line has both words.
+        self.write("src/main.rs", header() + "// Copyright 2026 Containment.ai LLC.\n// All rights reserved.\n"
+                   "fn main() {}\n")
+        self.assertFinding("H006", "src/main.rs")
+
+    def test_h006_standalone_line_is_not_prose(self) -> None:
+        # The sentence mid-paragraph is not a header-shaped line.
+        self.write("src/main.rs", header() + "// The vendor says all rights reserved by them, see NOTICE.\n"
+                   "fn main() {}\n")
+        self.assertClean()
+
+    def test_h001_fires_beside_h006_on_a_legacy_only_header(self) -> None:
+        # One H006 baseline entry must not excuse a file that has no D25 header.
+        self.write("src/legacy.rs", "// Copyright (c) 2026 Containment.ai LLC. All rights reserved.\nfn f() {}\n")
+        self.assertFinding("H001", "src/legacy.rs")
+        self.assertFinding("H006", "src/legacy.rs")
+
+    def test_utf8_bom_does_not_hide_the_header(self) -> None:
+        p = self.root / "src" / "bom.rs"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\xef\xbb\xbf" + (header() + "fn f() {}\n").encode("utf-8"))
+        self.assertClean()
+
+    def test_summary_counts_files_under_third_party_rules(self) -> None:
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # vendor/upstream/lib.js and vendor/closest/util.js are third-party.
+        self.assertIn("(2 under third-party rules", r.stdout)
+        self.assertIn(", 2 against the third-party rule", r.stdout)
+
+
 class Baseline(Fixture):
     def test_baselined_finding_is_excused(self) -> None:
         self.write("src/new.rs", "fn new() {}\n")

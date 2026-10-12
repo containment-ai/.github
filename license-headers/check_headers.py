@@ -163,7 +163,8 @@ AI_RE = re.compile(_LEAD + r"(AI-USE:.*?)" + _TRAIL)
 # an upstream "All rights reserved", never our pre-D25 identifier.
 LEGACY_ID_RE = re.compile(_LEAD + r"SPDX-License-Identifier:.*\bLicenseRef-Proprietary\b")
 LEGACY_RE = re.compile(_LEAD + r"(?:SPDX-License-Identifier:.*\bLicenseRef-Proprietary\b"
-                       r"|(?:Copyright|\(c\)|©).*\bAll rights reserved\b)", re.IGNORECASE)
+                       r"|(?:Copyright|\(c\)|©).*\bAll rights reserved\b"
+                       r"|All rights reserved\.?" + _TRAIL + r")", re.IGNORECASE)
 # REUSE ignores everything between its Ignore-Start/End markers; so does this gate.
 # Split literals, so neither REUSE nor this file reads its own markers as markers.
 IGNORE_START, IGNORE_END = "REUSE-" "IgnoreStart", "REUSE-" "IgnoreEnd"
@@ -190,6 +191,7 @@ class Annotation:
 class Report:
     findings: list[tuple[str, str, str]] = field(default_factory=list)  # (code, path, detail)
     checked: int = 0
+    third_party: int = 0  # inspected under the third-party rules (no D25 header required)
     skipped: dict[str, int] = field(default_factory=dict)
 
     def skip(self, why: str) -> None:
@@ -416,7 +418,10 @@ def head_lines(path: Path, rel: str) -> tuple[list[str], bool] | None:
     if b"\0" in raw[:8000]:
         return None
     has_content = bool(raw.strip()) or more
-    lines = raw.decode("utf-8", "replace").splitlines()[:WINDOW]
+    text = raw.decode("utf-8", "replace")
+    if text.startswith("\ufeff"):
+        text = text[1:]  # a UTF-8 BOM is not part of line 1's comment opener
+    lines = text.splitlines()[:WINDOW]
     out, ignoring = [], False
     for line in lines:
         if IGNORE_START in line:
@@ -455,8 +460,9 @@ def inspect(lines: list[str], expected: str, third_party: bool, cfg: Config) -> 
     if len(copies) > 1 or len(lics) > 1 or len(ais) > 1:
         found.append(("H008", f"{len(copies)} copyright, {len(lics)} licence and {len(ais)} AI-USE lines"))
     if not copies and not lics and not ais:
-        if not legacy:
-            found.append(("H001", "no SPDX-FileCopyrightText, SPDX-License-Identifier or AI-USE line"))
+        # H001 fires even beside H006: a legacy-only file has no D25 header, and
+        # a single H006 baseline entry must not excuse that too.
+        found.append(("H001", "no SPDX-FileCopyrightText, SPDX-License-Identifier or AI-USE line"))
         return found
     if not (copies and lics and ais) or not (lics[0][0] == copies[0][0] + 1 and ais[0][0] == copies[0][0] + 2):
         have = [n for n, xs in (("copyright", copies), ("licence", lics), ("AI-USE", ais)) if xs]
@@ -507,6 +513,8 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
             continue
         report.checked += 1
         expected, third_party = resolve(rel, annotations, cfg)
+        if third_party:
+            report.third_party += 1
         for code, detail in inspect(lines, expected, third_party, cfg):
             raw.append((code, rel, detail + source))
     current = {(c, p) for c, p, _ in raw}
@@ -601,9 +609,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"check_headers: ERROR: {exc}", file=sys.stderr)
         return 2
     skipped = ", ".join(f"{n} {why}" for why, n in sorted(report.skipped.items()))
-    print(f"check_headers: inspected {report.checked} files; not inspected: {skipped or 'none'}")
+    print(f"check_headers: inspected {report.checked} files ({report.third_party} under third-party rules, "
+          f"which require no D25 header); not inspected: {skipped or 'none'}")
     if not report.findings:
-        print("check_headers: every inspected file carries the D25 header its tier requires")
+        print(f"check_headers: no finding outside the baseline: {report.checked - report.third_party} "
+              f"checked against the D25 header rule, {report.third_party} against the third-party rule")
         return 0
     for code, rel, detail in report.findings:
         print(f"{code} {rel}: {CODES[code]} — {detail}")

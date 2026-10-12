@@ -22,6 +22,7 @@ Run: python3 scripts/test_check_reuse_lint.py
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -44,8 +45,19 @@ SPDX-License-Identifier = "LicenseRef-Test"
 """
 
 
-def run(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, str(WRAPPER), *args], capture_output=True, text=True)
+def isolated_env(home: Path | None = None) -> dict[str, str]:
+    """No global/system git config, as in test_check_headers.py: the verdict must
+    depend on the fixture only (templateDir hooks, autocrlf and defaultBranch
+    otherwise participate)."""
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+           "GIT_CONFIG_NOSYSTEM": "1"}
+    if home is not None:
+        env["HOME"] = str(home)
+    return env
+
+
+def run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(WRAPPER), *args], capture_output=True, text=True, env=env)
 
 
 class FakeReuse(unittest.TestCase):
@@ -115,24 +127,25 @@ class RealReuse(unittest.TestCase):
         for rel, text in files.items():
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text(text, encoding="utf-8")
-        subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
-        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        self.env = isolated_env(root)
+        subprocess.run(["git", "-C", str(root), "init", "-q"], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, env=self.env)
         return root
 
     def test_control_compliant_tree_passes(self) -> None:
         root = self.tree({"REUSE.toml": COMPLIANT_REUSE, "LICENSES/LicenseRef-Test.txt": "test licence\n",
                           "a.py": "print(1)\n"})
-        r = run("--root", str(root))
+        r = run("--root", str(root), env=self.env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_missing_licence_text_fails(self) -> None:
         root = self.tree({"REUSE.toml": COMPLIANT_REUSE, "a.py": "print(1)\n"})
-        r = run("--root", str(root))
+        r = run("--root", str(root), env=self.env)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_unlicensed_file_fails(self) -> None:
         root = self.tree({"LICENSES/LicenseRef-Test.txt": "test licence\n", "a.py": "print(1)\n"})
-        r = run("--root", str(root))
+        r = run("--root", str(root), env=self.env)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_this_repository_passes(self) -> None:
