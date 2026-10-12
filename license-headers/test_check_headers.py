@@ -117,6 +117,12 @@ class Fixture(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="check-headers-"))
         self.addCleanup(shutil.rmtree, self.root, True)
+        # The verdict must depend on the fixture only: no global/system git
+        # config (a global excludesFile ignoring `.env` would hide a fixture).
+        self.env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+                    "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(self.root),
+                    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                    "GIT_COMMITTER_EMAIL": "t@t"}
         self.write(".license-headers.toml", CONFIG.format(form=self.form))
         for rel, text in CLEAN.items():
             self.write(rel, text)
@@ -128,12 +134,20 @@ class Fixture(unittest.TestCase):
 
     def run_checker(self, *extra: str, after_stage=None) -> subprocess.CompletedProcess:
         git = ["git", "-C", str(self.root)]
-        subprocess.run(git + ["init", "-q"], check=True)
-        subprocess.run(git + ["add", "-A"], check=True)
+        if not (self.root / ".git").exists():
+            subprocess.run(git + ["init", "-q"], check=True, env=self.env)
+        subprocess.run(git + ["add", "-A"], check=True, env=self.env)
         if after_stage:
             after_stage()
         return subprocess.run([sys.executable, str(CHECKER), "--root", str(self.root), *extra],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=self.env)
+
+    def commit(self) -> None:
+        git = ["git", "-C", str(self.root)]
+        if not (self.root / ".git").exists():
+            subprocess.run(git + ["init", "-q"], check=True, env=self.env)
+        subprocess.run(git + ["add", "-A"], check=True, env=self.env)
+        subprocess.run(git + ["commit", "-q", "-m", "base"], check=True, env=self.env)
 
     def assertFinding(self, code: str, rel: str) -> None:
         r = self.run_checker()
@@ -404,6 +418,74 @@ SPDX-License-Identifier = ["MIT", "Apache-2.0"]
         for name in ("LICENCE.md", "LICENSE-MIT.md", "COPYING-GPL.md"):
             self.write(name, "licence text\n")
         self.assertClean()
+
+
+class Hardening(Fixture):
+    """Review of the gate as merged (#2445): misclassification, coverage, growth."""
+
+    def test_notice_words_do_not_make_a_path_third_party(self) -> None:
+        self.write("REUSE.toml", REUSE + """
+[[annotations]]
+path = "src/noticed/**"
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright (C) 2026 Containment.ai LLC"
+SPDX-License-Identifier = "LicenseRef-Containment-Commercial"
+""")
+        self.write("src/noticed/new.rs", "fn new() {}\n")
+        self.assertFinding("H001", "src/noticed/new.rs")
+
+    def test_extensionless_shebang_script_is_inspected(self) -> None:
+        self.write("bin/tool", "#!/bin/sh\necho hi\n")
+        self.assertFinding("H001", "bin/tool")
+
+    def test_extensionless_non_script_is_not_inspected(self) -> None:
+        self.write("bin/data", "plain data\n")
+        self.assertClean()
+
+    def test_duplicate_ai_use_line_is_h008(self) -> None:
+        self.write("src/main.rs", header() + "// " + AI + "\nfn main() {}\n")
+        self.assertFinding("H008", "src/main.rs")
+
+    def test_growth_since_ref_is_h011(self) -> None:
+        self.commit()
+        self.write("src/new.rs", "fn new() {}\n")
+        self.write("baseline.txt", "H001 src/new.rs\n")
+        r = self.run_checker("--no-growth-against", "HEAD")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("H011 src/new.rs:", r.stdout)
+
+    def test_growth_is_allowed_when_the_rules_changed(self) -> None:
+        self.commit()
+        self.write("src/new.rs", "fn new() {}\n")
+        self.write("baseline.txt", "H001 src/new.rs\n")
+        self.write(".license-headers.toml", CONFIG.format(form="d25") + "# rule change\n")
+        r = self.run_checker("--no-growth-against", "HEAD")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("allowed because", r.stdout)
+
+    def test_no_growth_passes_when_unchanged(self) -> None:
+        self.write("src/new.rs", "fn new() {}\n")
+        self.write("baseline.txt", "H001 src/new.rs\n")
+        self.commit()
+        r = self.run_checker("--no-growth-against", "HEAD")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_missing_baseline_at_ref_skips_growth(self) -> None:
+        (self.root / "baseline.txt").unlink()
+        self.commit()
+        self.write("src/new.rs", "fn new() {}\n")
+        self.write("baseline.txt", "H001 src/new.rs\n")
+        r = self.run_checker("--no-growth-against", "HEAD")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("first adoption", r.stdout)
+
+    def test_unknown_ref_exits_2(self) -> None:
+        self.commit()
+        self.assertEqual(self.run_checker("--no-growth-against", "no-such-ref").returncode, 2)
+
+    def test_h011_cannot_be_baselined(self) -> None:
+        self.write("baseline.txt", "H011 src/main.rs\n")
+        self.assertFinding("H010", "baseline.txt")
 
 
 class Baseline(Fixture):

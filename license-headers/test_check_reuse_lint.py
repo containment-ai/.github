@@ -15,13 +15,14 @@ SW-REQ-SC-014. The wrapper must never report a pass it did not measure:
 
 The real-run arms need reuse installed at the pinned version in this
 interpreter. They FAIL rather than skip when it is absent, so the gate cannot
-silently stop measuring (install: .github/requirements/reuse.txt).
+silently stop measuring (install: .github/requirements/requirements-reuse.txt).
 
 Run: python3 scripts/test_check_reuse_lint.py
 """
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 import sys
@@ -61,7 +62,19 @@ class FakeReuse(unittest.TestCase):
             f"print({lint_out!r}); sys.exit({lint_rc})\n",
             encoding="utf-8",
         )
-        return f"{sys.executable} {p}"
+        return f"{shlex.quote(sys.executable)} {shlex.quote(str(p))}"
+
+    def test_locale_is_pinned_for_the_verdict(self) -> None:
+        # A fake that prints a translated banner unless the wrapper pins the locale.
+        p = self.dir / "fake_locale.py"
+        p.write_text(
+            "import os, sys\n"
+            "if '--version' in sys.argv:\n"
+            "    print('reuse, version 6.2.0'); sys.exit(0)\n"
+            "print('Congratulations!' if os.environ.get('LC_ALL') == 'C' else 'Herzlichen Glückwunsch!')\n",
+            encoding="utf-8")
+        r = run("--reuse-cmd", f"{shlex.quote(sys.executable)} {shlex.quote(str(p))}")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_missing_reuse_exits_2(self) -> None:
         self.assertEqual(run("--reuse-cmd", str(self.dir / "no-such-reuse")).returncode, 2)

@@ -30,7 +30,11 @@ Shared licence checks for containment-ai repositories, run by the reusable workf
    ```
 
    The baseline excuses one finding code on one file. It only shrinks: an entry that
-   no longer matches a finding fails the check.
+   no longer matches a finding fails the check. The reusable workflow also passes
+   `--no-growth-against <base commit>` (input `baseline-growth`, default `on`): on a
+   pull request, merge group or push, an entry the base commit's baseline lacks fails
+   as H011 unless `.license-headers.toml` changed in the same diff. Run locally with
+   `--no-growth-against origin/main`.
 
 Adding a caller does not make the check required. That is a ruleset change in the
 calling repository.
