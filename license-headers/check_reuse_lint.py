@@ -14,7 +14,7 @@ it, and until this gate no workflow ran it.
 
 The version is pinned (PINNED below, installed hash-locked from the lock file
 next to this script, `requirements-reuse.txt`, or the repository's
-`.github/requirements/reuse.txt`) because reuse and license-expression decide
+`.github/requirements/requirements-reuse.txt`) because reuse and license-expression decide
 which identifiers are valid. A different version can change the verdict with
 no change to this repository, so a mismatch is exit 2, not a run.
 
@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 PINNED = "6.2.0"
-LOCK_CANDIDATES = ("requirements-reuse.txt", "../.github/requirements/reuse.txt")
+LOCK_CANDIDATES = ("requirements-reuse.txt", "../.github/requirements/requirements-reuse.txt")
 
 
 def install_hint() -> str:

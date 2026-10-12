@@ -15,7 +15,7 @@ SW-REQ-SC-014. The wrapper must never report a pass it did not measure:
 
 The real-run arms need reuse installed at the pinned version in this
 interpreter. They FAIL rather than skip when it is absent, so the gate cannot
-silently stop measuring (install: .github/requirements/reuse.txt).
+silently stop measuring (install: .github/requirements/requirements-reuse.txt).
 
 Run: python3 scripts/test_check_reuse_lint.py
 """
