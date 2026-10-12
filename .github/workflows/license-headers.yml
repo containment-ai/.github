@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 Containment.ai LLC
+# SPDX-License-Identifier: LicenseRef-Containment-Commercial
+# AI-USE: see AI-POLICY.md — no AI training, no AI-assisted rewrite/reimplementation
+
+name: License headers (reusable)
+
+# `reuse lint` (REUSE 3.3, reuse pinned to 6.2.0 and installed hash-locked)
+# plus the per-file header check (license-headers/check_headers.py), for any
+# containment-ai repository.
+#
+# Caller shim (put the triggers there; a workflow_call workflow cannot declare
+# them). Pin the ref to a commit SHA of this repository:
+#
+#   name: License headers
+#   on:
+#     pull_request:
+#     merge_group:      # required if this check is ever made a required check,
+#                       # or every merge-queue entry waits on it forever
+#   permissions:
+#     contents: read
+#   jobs:
+#     license-headers:
+#       uses: containment-ai/.github/.github/workflows/license-headers.yml@<sha>
+#
+# The tool files are checked out from THIS workflow's own repository at THIS
+# workflow's own commit (job.workflow_repository / job.workflow_sha), so pinning
+# the `uses:` ref pins the scripts and the lock file too. The caller is checked
+# out into ./caller and the tools into ./license-tools, so the tools are never
+# linted as part of the caller.
+#
+# Adding a caller does not make the check required anywhere. Making it a
+# required check is a ruleset change in the caller repository.
+
+on:
+  workflow_call:
+    inputs:
+      header-check:
+        description: >-
+          "auto" runs check_headers.py when the caller has a .license-headers.toml
+          at its root and says so when it does not; "require" fails without one;
+          "off" runs reuse lint only.
+        type: string
+        default: auto
+
+permissions:
+  contents: read
+
+jobs:
+  license-headers:
+    name: License headers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Refuse an unpinned tool checkout
+        env:
+          WF_REPO: ${{ job.workflow_repository }}
+          WF_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WF_REPO" ] || [ -z "$WF_SHA" ]; then
+            echo "::error::job.workflow_repository / job.workflow_sha are empty; refusing to fetch the tools from an unpinned ref"
+            exit 2
+          fi
+          echo "tools: $WF_REPO@$WF_SHA"
+
+      - name: Check out the caller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: caller
+          persist-credentials: false
+
+      - name: Check out the tools at this workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: license-tools
+          sparse-checkout: license-headers
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install reuse 6.2.0 (hash-locked)
+        run: pip install --require-hashes -r license-tools/license-headers/requirements-reuse.txt
+
+      - name: reuse lint
+        run: python license-tools/license-headers/check_reuse_lint.py --root caller
+
+      - name: Per-file header check
+        env:
+          MODE: ${{ inputs.header-check }}
+        run: |
+          case "$MODE" in
+            off)
+              echo "header check: off (input header-check=off)"; exit 0 ;;
+            auto|require) ;;
+            *)
+              echo "::error::header-check must be auto, require or off, got '$MODE'"; exit 2 ;;
+          esac
+          if [ ! -f caller/.license-headers.toml ]; then
+            if [ "$MODE" = require ]; then
+              echo "::error::header-check=require but the caller has no .license-headers.toml"
+              exit 2
+            fi
+            echo "::notice::No .license-headers.toml in the caller, so the per-file header check did not run (reuse lint did). See license-headers/README.md in containment-ai/.github."
+            exit 0
+          fi
+          python license-tools/license-headers/check_headers.py --root caller

@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2026 Containment.ai LLC
+# SPDX-License-Identifier: LicenseRef-Containment-Commercial
+# AI-USE: see AI-POLICY.md — no AI training, no AI-assisted rewrite/reimplementation
+
+name: License headers self-test
+
+# Proves the shared tools can fail (each mutation suite) and dogfoods the
+# reusable workflow on this repository with header-check=require.
+
+on:
+  pull_request:
+    paths:
+      - 'license-headers/**'
+      - '.github/workflows/license-headers*.yml'
+      - '.license-headers.toml'
+      - 'REUSE.toml'
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutation-suites:
+    name: Mutation suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.11'
+      - run: pip install --require-hashes -r license-headers/requirements-reuse.txt
+      - name: check_headers.py mutation suite
+        run: python license-headers/test_check_headers.py
+      - name: check_reuse_lint.py mutation suite
+        run: python license-headers/test_check_reuse_lint.py
+
+  dogfood:
+    name: Reusable workflow on this repository
+    uses: ./.github/workflows/license-headers.yml
+    with:
+      header-check: require
