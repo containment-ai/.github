@@ -204,6 +204,9 @@ def reuse_glob(pattern: str) -> re.Pattern:
         if pattern.startswith("\\*", i):
             out.append(re.escape("*"))
             i += 2
+        elif pattern.startswith("**/", i):
+            out.append("(?:.*/)?")  # `**/` also matches at the annotation root
+            i += 3
         elif pattern.startswith("**", i):
             out.append(".*")
             i += 2
@@ -219,7 +222,12 @@ def reuse_glob(pattern: str) -> re.Pattern:
     return re.compile("".join(out) + r"\Z")
 
 
-def load_annotations(root: Path) -> list[Annotation]:
+def load_annotations(root: Path, files: list[str]) -> list[Annotation]:
+    nested = [f for f in files if f.endswith("/REUSE.toml")]
+    if nested:
+        # REUSE 3.3 permits nested REUSE.toml files; this gate resolves the
+        # root file only, so it refuses rather than resolve a path wrongly.
+        raise InputError(f"nested REUSE.toml not supported by this gate: {', '.join(nested[:5])}")
     path = root / "REUSE.toml"
     if not path.is_file():
         raise InputError("REUSE.toml not found; this gate resolves tiers from it")
@@ -265,23 +273,18 @@ def names_other_holder(copyright_text: str, holder: str) -> bool:
 def resolve(path: str, annotations: list[Annotation], cfg: Config) -> tuple[str, bool]:
     """(expected expression, third_party) for a path.
 
-    REUSE uses the LAST matching annotation. An `override` match decides the
-    expression whatever the file says; with none, the file's own header wins
-    (`closest`) and the expected expression is the configured default. Both
-    values are derived from the SAME deciding annotation: the last override if
-    any, else the last match of any precedence."""
-    last_any = None
-    last_override = None
+    REUSE 3.3: exclusively the LAST matching annotation applies; its precedence
+    then says whether it or the file's own header wins. Either way the header
+    a first-party file should carry is that annotation's expression, so both
+    values come from the one deciding annotation. No match: the configured
+    default."""
+    deciding = None
     for ann in annotations:
         if any(p.match(path) for p in ann.patterns):
-            last_any = ann
-            if ann.precedence == "override":
-                last_override = ann
-    deciding = last_override or last_any
-    third_party = deciding is not None and names_other_holder(deciding.copyright, cfg.holder)
-    if last_override is not None or third_party:
-        return deciding.expression, third_party
-    return cfg.default_expression, False
+            deciding = ann
+    if deciding is None:
+        return cfg.default_expression, False
+    return deciding.expression, names_other_holder(deciding.copyright, cfg.holder)
 
 
 # --- config and baseline --------------------------------------------------------
@@ -437,10 +440,10 @@ def inspect(lines: list[str], expected: str, third_party: bool, cfg: Config) -> 
 
 def run(root: Path) -> tuple[Report, list[tuple[str, str]]]:
     cfg = load_config(root)
-    annotations = load_annotations(root)
     report = Report()
     baseline = read_baseline(root, cfg, report)
     files = tracked_files(root)
+    annotations = load_annotations(root, files)
     tracked = set(files)
     raw: list[tuple[str, str, str]] = []
     for rel in files:

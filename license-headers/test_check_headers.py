@@ -327,6 +327,38 @@ class RoundOneRegressions(Fixture):
         self.assertIn("(read from src/blob2.rs.license)", r.stdout)
 
 
+class RoundTwoRegressions(Fixture):
+    """REUSE 3.3 semantics found in review of the org copy."""
+
+    def test_globstar_slash_matches_at_the_root(self) -> None:
+        self.write("REUSE.toml", REUSE + f"""
+[[annotations]]
+path = "**/*.lua"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Containment.ai LLC"
+SPDX-License-Identifier = "{DUAL}"
+""")
+        self.write("top.lua", header(COMM, lead="--") + "return 1\n")
+        self.assertFinding("H004", "top.lua")
+
+    def test_only_the_last_matching_annotation_applies(self) -> None:
+        # crates/dual/** is an override for DUAL; a LATER closest table for the
+        # same file decides instead, so a COMM header is correct there.
+        self.write("REUSE.toml", REUSE + f"""
+[[annotations]]
+path = "crates/dual/later.rs"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Containment.ai LLC"
+SPDX-License-Identifier = "{COMM}"
+""")
+        self.write("crates/dual/later.rs", header(COMM) + "fn later() {}\n")
+        self.assertClean()
+
+    def test_nested_reuse_toml_exits_2(self) -> None:
+        self.write("sub/REUSE.toml", header(lead="#") + "version = 1\n")
+        self.assertEqual(self.run_checker().returncode, 2)
+
+
 class Baseline(Fixture):
     def test_baselined_finding_is_excused(self) -> None:
         self.write("src/new.rs", "fn new() {}\n")
