@@ -109,7 +109,8 @@ CODES = {
 BUILTIN_EXEMPT = (
     "*.json", "*.jsonc", "*.json5", "*.jsonl", "*.ndjson",
     "*.lock", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "go.sum",
-    "LICENSES/*", "LICENSE", "LICENSE.*", "COPYING", "COPYING.*", "NOTICE", "NOTICE.*",
+    "LICENSES/*", "LICENSE", "LICENSE.*", "LICENSE-*", "LICENCE", "LICENCE.*", "LICENCE-*",
+    "COPYING", "COPYING.*", "COPYING-*", "NOTICE", "NOTICE.*",
     "AI-POLICY.md", "AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md", ".cursor/rules/*",
     "CHANGELOG*", "*.license", ".gitkeep", ".keep",
 )
@@ -243,11 +244,15 @@ def load_annotations(root: Path, files: list[str]) -> list[Annotation]:
         cr = ann.get("SPDX-FileCopyrightText", "")
         if isinstance(cr, list):
             cr = "\n".join(cr)
+        expr = ann.get("SPDX-License-Identifier", "")
+        if isinstance(expr, list):
+            # REUSE 3.3 allows a list; its entries apply together (AND).
+            expr = " AND ".join(f"({e})" if " " in str(e).strip() else str(e) for e in expr)
         out.append(Annotation(
             patterns=[reuse_glob(p) for p in paths],
             precedence=ann.get("precedence", "closest"),
             copyright=cr,
-            expression=str(ann.get("SPDX-License-Identifier", "")),
+            expression=str(expr),
         ))
     return out
 
@@ -420,7 +425,7 @@ def inspect(lines: list[str], expected: str, third_party: bool, cfg: Config) -> 
             found.append(("H008", f"{len(lics)} licence lines"))
         if ais:
             found.append(("H007", f"AI-USE line on line {ais[0][0] + 1} of a third-party file"))
-        if copies and all(cfg.holder in c for _, c in copies):
+        if copies and not any(names_other_holder(c, cfg.holder) for _, c in copies):
             found.append(("H007", f"only {cfg.holder} named as copyright holder of a third-party file"))
         if lics and lics[0][1] != expected:
             found.append(("H004", f"{lics[0][1]!r}, REUSE.toml says {expected!r}"))

@@ -383,6 +383,29 @@ SPDX-License-Identifier = "MIT"
         self.assertIn("H001 src/new.rs", (self.root / "baseline.txt").read_text())
 
 
+class RoundFourRegressions(Fixture):
+    def test_joint_inline_copyright_on_third_party_is_allowed(self) -> None:
+        self.write("vendor/upstream/mod.js", "// SPDX-FileCopyrightText: 2024 Upstream Authors and 2026 Containment.ai LLC\n"
+                                             "// SPDX-License-Identifier: MIT\n")
+        self.assertClean()
+
+    def test_list_valued_expression_is_joined_with_and(self) -> None:
+        self.write("REUSE.toml", REUSE + """
+[[annotations]]
+path = "src/both/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Containment.ai LLC"
+SPDX-License-Identifier = ["MIT", "Apache-2.0"]
+""")
+        self.write("src/both/x.rs", header("MIT AND Apache-2.0") + "fn x() {}\n")
+        self.assertClean()
+
+    def test_licence_text_variants_are_exempt(self) -> None:
+        for name in ("LICENCE.md", "LICENSE-MIT.md", "COPYING-GPL.md"):
+            self.write(name, "licence text\n")
+        self.assertClean()
+
+
 class Baseline(Fixture):
     def test_baselined_finding_is_excused(self) -> None:
         self.write("src/new.rs", "fn new() {}\n")
