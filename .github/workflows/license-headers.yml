@@ -13,7 +13,8 @@ name: License headers (reusable)
 #
 #   name: License headers
 #   on:
-#     pull_request:
+#     pull_request:     # not pull_request_target: that checks out the base
+#                       # branch, so the workflow refuses it (exit 2)
 #     merge_group:      # required if this check is ever made a required check,
 #                       # or every merge-queue entry waits on it forever
 #   permissions:
@@ -47,8 +48,9 @@ on:
           check_headers.py, so a baseline entry the base commit's baseline
           lacks fails as H011 unless .license-headers.toml changed too. The
           base is the pull request's base commit, the merge group's base
-          commit, or a push's previous tip; on any other event, or a push
-          that creates a branch, it is skipped with a notice. "off" skips it.
+          commit, or a push's previous tip; on any other event, a push that
+          creates a branch, or a force push whose previous tip is not in the
+          checkout, it is skipped with a notice. "off" skips it.
         type: string
         default: "on"
 
@@ -65,12 +67,19 @@ jobs:
         env:
           WF_REPO: ${{ job.workflow_repository }}
           WF_SHA: ${{ job.workflow_sha }}
+          EVENT: ${{ github.event_name }}
         run: |
           if [ -z "$WF_REPO" ] || [ -z "$WF_SHA" ]; then
             echo "::error::job.workflow_repository / job.workflow_sha are empty; refusing to fetch the tools from an unpinned ref"
             exit 2
           fi
           echo "tools: $WF_REPO@$WF_SHA"
+          # pull_request_target checks out the BASE branch, so every check
+          # here would pass or fail on code the pull request does not contain.
+          if [ "$EVENT" = pull_request_target ]; then
+            echo "::error::call this workflow from pull_request, not pull_request_target: under pull_request_target the caller checkout is the base branch, not the pull request"
+            exit 2
+          fi
 
       - name: Check out the caller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -131,13 +140,19 @@ jobs:
           base=""
           if [ "$GROWTH" = on ]; then
             case "$EVENT" in
-              pull_request|pull_request_target) base="$PR_BASE" ;;
+              pull_request) base="$PR_BASE" ;;
               merge_group) base="$MG_BASE" ;;
               push) base="$PUSH_BEFORE" ;;
             esac
             # A push that creates a branch reports an all-zero "before".
             case "$base" in *[!0]*) ;; *) base="" ;; esac
-            if [ -z "$base" ]; then
+            # A force push's previous tip may be reachable from no ref, so it
+            # is not in the checkout; skip rather than exit 2 on it. (The
+            # gating events, pull_request and merge_group, always have it.)
+            if [ -n "$base" ] && [ "$EVENT" = push ] && ! git -C caller cat-file -e "${base}^{commit}" 2>/dev/null; then
+              echo "::notice::baseline-growth: push base $base is not in the checkout (force push?), so H011 did not run"
+              base=""
+            elif [ -z "$base" ]; then
               echo "::notice::baseline-growth: no base commit for event '$EVENT', so H011 did not run"
             fi
           fi
