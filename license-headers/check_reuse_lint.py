@@ -45,7 +45,11 @@ def install_hint() -> str:
         if lock.is_file():
             return f"pip install --require-hashes -r {lock}"
     return f"pip install reuse=={PINNED} (hash-locked)"
-VERSION_RE = re.compile(r"\bversion\s+(\d+(?:\.\d+)+)\b")
+
+
+# The version must END the banner line: `6.2.0.dev1` or `6.2.0.post1` is a
+# different build and must not satisfy the pin.
+VERSION_RE = re.compile(r"\bversion\s+(\d+(?:\.\d+)+)\s*$")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,9 +66,13 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"check_reuse_lint: ERROR: cannot run reuse ({exc}). Install it: {install_hint()}", file=sys.stderr)
         return 2
-    first = (ver.stdout or ver.stderr).splitlines()[0] if (ver.stdout or ver.stderr) else ""
-    m = VERSION_RE.search(first)
+    # Search every line: a warning printed ahead of the banner must not turn the
+    # gate permanently red. The LAST banner-shaped line wins.
+    lines = (ver.stdout + "\n" + ver.stderr).splitlines()
+    banners = [m for line in lines if (m := VERSION_RE.search(line.strip()))]
+    m = banners[-1] if banners else None
     if ver.returncode != 0 or not m:
+        first = next((l for l in lines if l.strip()), "")
         print(f"check_reuse_lint: ERROR: reuse is not installed or did not report a version "
               f"(rc {ver.returncode}: {first[:120]!r}). Install it: {install_hint()}", file=sys.stderr)
         return 2

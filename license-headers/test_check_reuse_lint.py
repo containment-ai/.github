@@ -80,6 +80,17 @@ class FakeReuse(unittest.TestCase):
     def test_crash_rc_exits_2(self) -> None:
         self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0", 3, "boom")).returncode, 2)
 
+    def test_dev_build_of_the_pinned_version_exits_2(self) -> None:
+        self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0.dev1", 0, "Congratulations!")).returncode, 2)
+
+    def test_post_release_of_the_pinned_version_exits_2(self) -> None:
+        self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0.post1", 0, "Congratulations!")).returncode, 2)
+
+    def test_warning_line_before_the_banner_is_tolerated(self) -> None:
+        r = run("--reuse-cmd", self.fake("DeprecationWarning: something\nreuse, version 6.2.0", 0,
+                                         "Congratulations!"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_lint_failure_exits_1(self) -> None:
         self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0", 1, "not compliant")).returncode, 1)
 

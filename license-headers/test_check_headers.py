@@ -18,6 +18,7 @@ Run: python3 scripts/test_check_headers.py
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -72,6 +73,18 @@ SPDX-FileCopyrightText = "2024 Upstream Authors"
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
+path = "crates/one/?.rs"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Containment.ai LLC"
+SPDX-License-Identifier = "{DUAL}"
+
+[[annotations]]
+path = "vendor/joint/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2022 Upstream Author, 2026 Containment.ai LLC"
+SPDX-License-Identifier = "MIT AND LicenseRef-Containment-Commercial"
+
+[[annotations]]
 path = "vendor/closest/**"
 precedence = "closest"
 SPDX-FileCopyrightText = "2023 Other Upstream"
@@ -113,10 +126,12 @@ class Fixture(unittest.TestCase):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
 
-    def run_checker(self, *extra: str) -> subprocess.CompletedProcess:
+    def run_checker(self, *extra: str, after_stage=None) -> subprocess.CompletedProcess:
         git = ["git", "-C", str(self.root)]
         subprocess.run(git + ["init", "-q"], check=True)
         subprocess.run(git + ["add", "-A"], check=True)
+        if after_stage:
+            after_stage()
         return subprocess.run([sys.executable, str(CHECKER), "--root", str(self.root), *extra],
                               capture_output=True, text=True)
 
@@ -231,6 +246,85 @@ class EachRuleFires(Fixture):
     def test_h010_baseline_cannot_excuse_its_own_codes(self) -> None:
         self.write("baseline.txt", "H009 src/main.rs\n")
         self.assertFinding("H010", "baseline.txt")
+
+
+class RoundOneRegressions(Fixture):
+    """Bypasses found in review of the first revision; each must stay closed."""
+
+    def test_missing_tracked_file_exits_2(self) -> None:
+        r = self.run_checker(after_stage=lambda: (self.root / "src/main.rs").unlink())
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root can read a mode-000 file")
+    def test_unreadable_tracked_file_exits_2(self) -> None:
+        target = self.root / "src/main.rs"
+        self.addCleanup(lambda: target.chmod(0o644))
+        r = self.run_checker(after_stage=lambda: target.chmod(0))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_leading_blank_lines_do_not_make_a_file_empty(self) -> None:
+        self.write("src/blank.py", "\n" * 45 + "print(1)\n")
+        self.assertFinding("H001", "src/blank.py")
+
+    def test_ignore_block_over_the_window_does_not_make_a_file_empty(self) -> None:
+        self.write("src/hidden.py", "# REUSE-" "IgnoreStart\n" + "x = 1\n" * 50 + "# REUSE-" "IgnoreEnd\n")
+        self.assertFinding("H001", "src/hidden.py")
+
+    def test_truly_empty_file_is_skipped(self) -> None:
+        self.write("src/empty.py", "\n\n")
+        self.assertClean()
+
+    def test_extension_like_dotfile_is_inspected(self) -> None:
+        self.write(".env", "KEY=value\n")
+        self.assertFinding("H001", ".env")
+
+    def test_question_mark_glob_matches_one_character(self) -> None:
+        self.write("crates/one/a.rs", header(COMM) + "fn a() {}\n")
+        self.assertFinding("H004", "crates/one/a.rs")
+
+    def test_question_mark_glob_does_not_cross_a_slash(self) -> None:
+        self.write("crates/one/ab.rs", header(COMM) + "fn ab() {}\n")
+        self.assertClean()
+
+    def test_third_party_legacy_identifier_fires(self) -> None:
+        self.write("vendor/upstream/old.js", "// SPDX-FileCopyrightText: 2024 Upstream Authors\n"
+                                             "// SPDX-License-Identifier: LicenseRef-Proprietary\n")
+        self.assertFinding("H006", "vendor/upstream/old.js")
+
+    def test_third_party_upstream_all_rights_reserved_is_allowed(self) -> None:
+        self.write("vendor/upstream/lib.js", "// Copyright (c) 2024 Upstream Authors. All rights reserved.\n"
+                                             "// SPDX-License-Identifier: MIT\n")
+        self.assertClean()
+
+    def test_third_party_duplicate_licence_line_fires(self) -> None:
+        self.write("vendor/upstream/lib.js", "// SPDX-FileCopyrightText: 2024 Upstream Authors\n"
+                                             "// SPDX-License-Identifier: MIT\n// SPDX-License-Identifier: MIT\n")
+        self.assertFinding("H008", "vendor/upstream/lib.js")
+
+    def test_joint_copyright_annotation_is_third_party(self) -> None:
+        self.write("vendor/joint/mixed.js", "// " + AI + "\nmodule.exports = 3;\n")
+        self.assertFinding("H007", "vendor/joint/mixed.js")
+
+    def test_prose_quoting_the_legacy_strings_is_not_h006(self) -> None:
+        self.write("src/doc.py", header(lead="#") + 'MARK = "All rights reserved"  # LicenseRef-Proprietary\n')
+        self.assertClean()
+
+    def test_untracked_file_is_inspected(self) -> None:
+        r = self.run_checker(after_stage=lambda: self.write("src/unstaged.rs", "fn u() {}\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("H001 src/unstaged.rs:", r.stdout)
+
+    def test_sidecar_replaces_the_file_it_describes(self) -> None:
+        self.write("src/both.rs", header() + "fn both() {}\n")
+        self.write("src/both.rs.license", header(lead="").replace("\n ", "\n").lstrip())
+        self.assertClean()  # one header is read, not two, so no H008
+
+    def test_sidecar_finding_names_the_sidecar(self) -> None:
+        self.write("src/blob2.rs", header() + "fn blob2() {}\n")
+        self.write("src/blob2.rs.license", "SPDX-License-Identifier: LicenseRef-Containment-Commercial\n")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("(read from src/blob2.rs.license)", r.stdout)
 
 
 class Baseline(Fixture):

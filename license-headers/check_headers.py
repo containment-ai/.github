@@ -149,7 +149,13 @@ _TRAIL = r"\s*(?:\*/|-->)?\s*$"
 COPY_RE = re.compile(_LEAD + r"SPDX-FileCopyrightText:\s*(.*?)" + _TRAIL)
 LIC_RE = re.compile(_LEAD + r"SPDX-License-Identifier:\s*(.*?)" + _TRAIL)
 AI_RE = re.compile(_LEAD + r"(AI-USE:.*?)" + _TRAIL)
-LEGACY_RE = re.compile(r"LicenseRef-Proprietary|All rights reserved", re.IGNORECASE)
+# Pre-D25 marking, matched only on header-shaped lines (a comment line that IS
+# a licence tag or a copyright notice), so prose that quotes the strings is not
+# a finding. LEGACY_ID_RE is the identifier alone: third-party files may carry
+# an upstream "All rights reserved", never our pre-D25 identifier.
+LEGACY_ID_RE = re.compile(_LEAD + r"SPDX-License-Identifier:.*\bLicenseRef-Proprietary\b")
+LEGACY_RE = re.compile(_LEAD + r"(?:SPDX-License-Identifier:.*\bLicenseRef-Proprietary\b"
+                       r"|(?:Copyright|\(c\)|©).*\bAll rights reserved\b)", re.IGNORECASE)
 # REUSE ignores everything between its Ignore-Start/End markers; so does this gate.
 # Split literals, so neither REUSE nor this file reads its own markers as markers.
 IGNORE_START, IGNORE_END = "REUSE-" "IgnoreStart", "REUSE-" "IgnoreEnd"
@@ -190,7 +196,9 @@ class InputError(Exception):
 # --- REUSE.toml ---------------------------------------------------------------
 
 def reuse_glob(pattern: str) -> re.Pattern:
-    """REUSE 3.3 path globbing: `**` crosses `/`, `*` does not, `\\*` is literal."""
+    """REUSE 3.3 path globbing: `**` crosses `/`; `*` and `?` do not; `\\*` is literal.
+
+    Same semantics as glob_to_regex in scripts/check_reuse_license_map.py."""
     out, i = [], 0
     while i < len(pattern):
         if pattern.startswith("\\*", i):
@@ -201,6 +209,9 @@ def reuse_glob(pattern: str) -> re.Pattern:
             i += 2
         elif pattern[i] == "*":
             out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
             i += 1
         else:
             out.append(re.escape(pattern[i]))
@@ -233,8 +244,32 @@ def load_annotations(root: Path) -> list[Annotation]:
     return out
 
 
+_YEARS_RE = re.compile(r"\b\d{4}(?:\s*-\s*\d{4})?\b")
+_JOINERS_RE = re.compile(r"[,;&()]|\band\b", re.IGNORECASE)
+
+
+def names_other_holder(copyright_text: str, holder: str) -> bool:
+    """True when the annotation names any copyright holder besides ours.
+
+    A joint notice (upstream authors AND us, the normal marking for a vendored
+    file we modified) is third-party: the gate must never demand our marking on
+    it. Our holder, years and joining words are removed; anything left is
+    another holder."""
+    for line in copyright_text.splitlines():
+        rest = _JOINERS_RE.sub(" ", _YEARS_RE.sub(" ", line.replace(holder, " ")))
+        if re.search(r"[A-Za-z]", rest):
+            return True
+    return False
+
+
 def resolve(path: str, annotations: list[Annotation], cfg: Config) -> tuple[str, bool]:
-    """(expected expression, third_party) for a path. REUSE uses the last match."""
+    """(expected expression, third_party) for a path.
+
+    REUSE uses the LAST matching annotation. An `override` match decides the
+    expression whatever the file says; with none, the file's own header wins
+    (`closest`) and the expected expression is the configured default. Both
+    values are derived from the SAME deciding annotation: the last override if
+    any, else the last match of any precedence."""
     last_any = None
     last_override = None
     for ann in annotations:
@@ -242,11 +277,10 @@ def resolve(path: str, annotations: list[Annotation], cfg: Config) -> tuple[str,
             last_any = ann
             if ann.precedence == "override":
                 last_override = ann
-    third_party = last_any is not None and cfg.holder not in last_any.copyright
-    if last_override is not None:
-        return last_override.expression, third_party
-    if third_party:
-        return last_any.expression, True
+    deciding = last_override or last_any
+    third_party = deciding is not None and names_other_holder(deciding.copyright, cfg.holder)
+    if last_override is not None or third_party:
+        return deciding.expression, third_party
     return cfg.default_expression, False
 
 
@@ -298,12 +332,15 @@ def read_baseline(root: Path, cfg: Config, report: Report) -> set[tuple[str, str
 # --- per-file inspection --------------------------------------------------------
 
 def tracked_files(root: Path) -> list[str]:
+    """Tracked files plus untracked files git does not ignore: the set `reuse
+    lint` walks, so a new file is inspected before it is staged, not only in CI."""
     try:
-        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others",
+                              "--exclude-standard"],
                              capture_output=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise InputError(f"git ls-files failed: {exc}") from exc
-    return sorted(p for p in out.decode("utf-8", "surrogateescape").split("\0") if p)
+    return sorted({p for p in out.decode("utf-8", "surrogateescape").split("\0") if p})
 
 
 def glob_match(path: str, patterns: tuple[str, ...]) -> bool:
@@ -319,21 +356,29 @@ def glob_match(path: str, patterns: tuple[str, ...]) -> bool:
 
 def commentable(path: str) -> bool:
     name = path.rsplit("/", 1)[-1]
-    if name in COMMENT_NAMES or name.startswith("Dockerfile."):
-        return True
+    if name in COMMENT_NAMES or name.startswith("Dockerfile.") or name.lower() in COMMENT_EXT:
+        return True  # the last arm: an extension-like dotfile name such as `.env`
     dot = name.rfind(".")
     return dot > 0 and name[dot:].lower() in COMMENT_EXT
 
 
-def head_lines(path: Path) -> list[str] | None:
-    """First WINDOW lines with REUSE-Ignore blocks blanked, or None if binary/unreadable."""
+def head_lines(path: Path, rel: str) -> tuple[list[str], bool] | None:
+    """(first WINDOW lines with REUSE-Ignore blocks blanked, file has content).
+
+    None means a binary file. A file that cannot be read is NOT skipped: it is
+    an InputError (exit 2), because a gate that cannot look must not pass.
+    "Has content" is judged from the file's bytes, not from the filtered window,
+    so leading blank lines or an ignore block over the window cannot make a
+    real source file look empty."""
     try:
         with path.open("rb") as fh:
             raw = fh.read(65536)
-    except OSError:
-        return None
+            more = bool(fh.read(1))
+    except OSError as exc:
+        raise InputError(f"cannot read {rel}: {exc}") from exc
     if b"\0" in raw[:8000]:
         return None
+    has_content = bool(raw.strip()) or more
     lines = raw.decode("utf-8", "replace").splitlines()[:WINDOW]
     out, ignoring = [], False
     for line in lines:
@@ -342,17 +387,24 @@ def head_lines(path: Path) -> list[str] | None:
         out.append("" if ignoring else line)
         if IGNORE_END in line:
             ignoring = False
-    return out
+    return out, has_content
 
 
-def inspect(rel: str, lines: list[str], expected: str, third_party: bool, cfg: Config) -> list[tuple[str, str]]:
+def inspect(lines: list[str], expected: str, third_party: bool, cfg: Config) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     copies = [(i, m.group(1)) for i, l in enumerate(lines) if (m := COPY_RE.match(l))]
     lics = [(i, m.group(1)) for i, l in enumerate(lines) if (m := LIC_RE.match(l))]
     ais = [(i, m.group(1)) for i, l in enumerate(lines) if (m := AI_RE.match(l))]
-    legacy = [i for i, l in enumerate(lines) if LEGACY_RE.search(l)]
+    legacy = [i for i, l in enumerate(lines) if LEGACY_RE.match(l)]
 
     if third_party:
+        # Tier-independent checks first. An upstream "All rights reserved" is
+        # legitimate here; our pre-D25 identifier and a second licence line are not.
+        legacy_id = [i for i, l in enumerate(lines) if LEGACY_ID_RE.match(l)]
+        if legacy_id:
+            found.append(("H006", f"line {legacy_id[0] + 1}: {lines[legacy_id[0]].strip()[:80]!r}"))
+        if len(lics) > 1:
+            found.append(("H008", f"{len(lics)} licence lines"))
         if ais:
             found.append(("H007", f"AI-USE line on line {ais[0][0] + 1} of a third-party file"))
         if copies and all(cfg.holder in c for _, c in copies):
@@ -371,7 +423,7 @@ def inspect(rel: str, lines: list[str], expected: str, third_party: bool, cfg: C
         return found
     if not (copies and lics and ais) or not (lics[0][0] == copies[0][0] + 1 and ais[0][0] == copies[0][0] + 2):
         have = [n for n, xs in (("copyright", copies), ("licence", lics), ("AI-USE", ais)) if xs]
-        found.append(("H002", f"have {', '.join(have) or 'none'}; need all three on consecutive lines in that order"))
+        found.append(("H002", f"have {', '.join(have)}; need all three on consecutive lines in that order"))
     if copies and copies[0][1] != f"{cfg.years} {cfg.holder}":
         found.append(("H003", f"{copies[0][1]!r}, expected {cfg.years + ' ' + cfg.holder!r}"))
     if lics and lics[0][1] != expected:
@@ -401,21 +453,25 @@ def run(root: Path) -> tuple[Report, list[tuple[str, str]]]:
         if not commentable(rel):
             report.skip("no known comment syntax")
             continue
-        lines = head_lines(root / rel)
-        if lines is None:
-            report.skip("binary or unreadable")
-            continue
         sidecar = rel + ".license"
         if sidecar in tracked:
-            side = head_lines(root / sidecar) or []
-            lines = side + lines
-        if not any(l.strip() for l in lines):
+            # REUSE reads a .license sidecar INSTEAD of the file it describes.
+            got = head_lines(root / sidecar, sidecar)
+            source = f" (read from {sidecar})"
+        else:
+            got = head_lines(root / rel, rel)
+            source = ""
+        if got is None:
+            report.skip("binary")
+            continue
+        lines, has_content = got
+        if not has_content and not source:
             report.skip("empty")
             continue
         report.checked += 1
         expected, third_party = resolve(rel, annotations, cfg)
-        for code, detail in inspect(rel, lines, expected, third_party, cfg):
-            raw.append((code, rel, detail))
+        for code, detail in inspect(lines, expected, third_party, cfg):
+            raw.append((code, rel, detail + source))
     current = {(c, p) for c, p, _ in raw}
     for code, rel, detail in raw:
         if (code, rel) not in baseline:
