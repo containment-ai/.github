@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Containment.ai LLC
+# SPDX-License-Identifier: LicenseRef-Containment-Commercial
+# AI-USE: see AI-POLICY.md — no AI training, no AI-assisted rewrite/reimplementation
+#
+# This repository's own config for license-headers/check_headers.py, so the
+# org workflow is exercised on the repository that ships it. Licence tiers come
+# from REUSE.toml, not from here.
+
+years = "2026"
+holder = "Containment.ai LLC"
+default-expression = "LicenseRef-Containment-Commercial"
+agpl-ai-use = "d25"
+
+# The organization profile page is rendered on github.com/containment-ai and
+# is annotated in REUSE.toml instead of carrying an inline header.
+exempt = ["profile/**"]
