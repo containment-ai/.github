@@ -620,13 +620,21 @@ def baseline_growth(root: Path, cfg: Config, ref: str, report: Report) -> None:
             return subprocess.run(git + args, capture_output=True)
         except OSError as exc:  # git missing or not executable: exit 2, not a traceback
             raise InputError(f"--no-growth-against: cannot run git: {exc}") from exc
-    shown = run_git(["show", f"{ref}:{cfg.baseline}"])
-    if shown.returncode != 0:
-        exists = run_git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
-        if exists.returncode != 0:
-            raise InputError(f"--no-growth-against: {ref!r} is not a commit")
+    if run_git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"]).returncode != 0:
+        raise InputError(f"--no-growth-against: {ref!r} is not a commit")
+    # Only a baseline that is genuinely ABSENT at ref means first adoption. A git
+    # failure reading the tree or the blob (corrupt or unreachable object) is an
+    # input error: treating it as "no baseline" would skip H011 and pass.
+    listed = run_git(["ls-tree", "--name-only", ref, "--", cfg.baseline])
+    if listed.returncode != 0:
+        raise InputError(f"--no-growth-against: cannot read the tree of {ref!r} (git rc {listed.returncode})")
+    if not listed.stdout.strip():
         print(f"check_headers: no baseline at {ref}; growth check skipped (first adoption)")
         return
+    shown = run_git(["show", f"{ref}:{cfg.baseline}"])
+    if shown.returncode != 0:
+        raise InputError(f"--no-growth-against: {cfg.baseline} exists at {ref!r} but cannot be read "
+                         f"(git rc {shown.returncode})")
     def entries(text: str) -> set[tuple[str, str]]:
         out = set()
         for line in text.splitlines():
@@ -646,6 +654,8 @@ def baseline_growth(root: Path, cfg: Config, ref: str, report: Report) -> None:
     except ValueError:
         pass  # the script lives outside the checked repository (org workflow)
     changed = run_git(["diff", "--quiet", ref, "--", *rules])
+    if changed.returncode not in (0, 1):  # 0 = unchanged, 1 = changed; anything else is git failing
+        raise InputError(f"--no-growth-against: git diff against {ref!r} failed (rc {changed.returncode})")
     if changed.returncode == 1:
         print(f"check_headers: baseline grew by {len(grown)} entr{'y' if len(grown) == 1 else 'ies'} "
               f"since {ref}, allowed because {' or '.join(rules)} changed too:")

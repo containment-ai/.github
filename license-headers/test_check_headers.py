@@ -795,6 +795,52 @@ class RoundEightRegressions(Fixture):
             with self.assertRaises(check_headers.InputError):
                 check_headers.baseline_growth(self.root, cfg, "HEAD", check_headers.Report())
 
+    def growth_with(self, rcs: dict[str, tuple[int, bytes]]):
+        """Run baseline_growth with git faked per subcommand: {subcmd: (rc, stdout)}."""
+        sys.path.insert(0, str(CHECKER.parent))
+        self.addCleanup(sys.path.remove, str(CHECKER.parent))
+        prev, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+        try:
+            import check_headers
+        finally:
+            sys.dont_write_bytecode = prev
+        self.write("baseline.txt", "H001 src/new.rs\n")
+        cfg = check_headers.Config(years="2026", holder="H", default_expression="X", agpl_ai_use="d25",
+                                   exempt=(), baseline="baseline.txt")
+        def fake(cmd, **kw):
+            rc, out = rcs[cmd[3]]  # cmd = ["git", "-C", root, <subcommand>, ...]
+            return subprocess.CompletedProcess(cmd, rc, out, b"")
+        report = check_headers.Report()
+        with mock.patch.object(check_headers.subprocess, "run", side_effect=fake):
+            check_headers.baseline_growth(self.root, cfg, "HEAD", report)
+        return check_headers, report
+
+    def test_headers_growth_check_unreadable_baseline_blob_is_input_error(self) -> None:
+        # Codex connector on containment-ai/.github#10: git starts, the path is in
+        # the tree, but `git show` fails (corrupt object). That must not read as
+        # "no baseline at ref" (which skipped H011 and passed).
+        with self.assertRaisesRegex(Exception, "cannot be read"):
+            self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b"baseline.txt\n"),
+                              "show": (128, b""), "diff": (0, b"")})
+
+    def test_headers_growth_check_unreadable_tree_is_input_error(self) -> None:
+        with self.assertRaisesRegex(Exception, "cannot read the tree"):
+            self.growth_with({"rev-parse": (0, b""), "ls-tree": (128, b""), "show": (128, b""), "diff": (0, b"")})
+
+    def test_headers_growth_check_failed_diff_is_input_error(self) -> None:
+        with self.assertRaisesRegex(Exception, "git diff against"):
+            self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b"baseline.txt\n"),
+                              "show": (0, b""), "diff": (128, b"")})
+
+    def test_headers_growth_check_absent_baseline_is_first_adoption(self) -> None:
+        _, report = self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b""), "show": (128, b""), "diff": (0, b"")})
+        self.assertEqual(report.findings, [])
+
+    def test_headers_growth_check_new_entry_is_h011(self) -> None:
+        _, report = self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b"baseline.txt\n"),
+                                      "show": (0, b""), "diff": (0, b"")})
+        self.assertEqual([c for c, _, _ in report.findings], ["H011"])
+
 
 class Repository(unittest.TestCase):
     def test_this_repository_passes(self) -> None:
