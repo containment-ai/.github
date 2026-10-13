@@ -65,9 +65,12 @@ config also changed since REF (a rule change may legitimately surface old
 files; the growth is then printed).
 
 Exit codes: 0 = no findings; 1 = at least one finding (each printed);
-2 = inputs could not be read.
+2 = inputs could not be read, a .license sidecar is binary, or fewer files
+were inspected than the anti-vacuity floor (`min-inspected` in the config,
+default 1, or --min-inspected N): a clean verdict over a population that
+collapsed is refused rather than reported.
 
-Run: python3 scripts/check_headers.py [--root DIR] [--write-baseline]
+Run: python3 scripts/check_headers.py [--root DIR] [--write-baseline] [--min-inspected N]
 Standard library only (Python 3.11+, for tomllib).
 """
 
@@ -178,6 +181,7 @@ class Config:
     agpl_ai_use: str
     exempt: tuple[str, ...]
     baseline: str
+    min_inspected: int = 1
 
 
 @dataclass
@@ -327,6 +331,12 @@ def load_config(root: Path) -> Config:
     baseline = data.get("baseline", "")
     if not isinstance(baseline, str):
         raise InputError(f"{CONFIG_NAME}: baseline must be a string path")
+    # Anti-vacuity floor: a verdict over fewer files than this is refused
+    # (exit 2), so a --root that resolves to the wrong subtree, or a tracked-file
+    # set that collapses, cannot read as clean. Never 0: absent means 1.
+    floor = data.get("min-inspected", 1)
+    if isinstance(floor, bool) or not isinstance(floor, int) or floor < 1:
+        raise InputError(f"{CONFIG_NAME}: min-inspected must be an integer >= 1, got {floor!r}")
     return Config(
         years=str(data["years"]),
         holder=str(data["holder"]),
@@ -334,6 +344,7 @@ def load_config(root: Path) -> Config:
         agpl_ai_use=form,
         exempt=tuple(exempt),
         baseline=baseline,
+        min_inspected=floor,
     )
 
 
@@ -512,6 +523,10 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
             got = head_lines(root / rel, rel)
             source = ""
         if got is None:
+            if has_sidecar:
+                # A sidecar IS licence metadata; one that reads as binary is
+                # malformed, not exempt. Fail closed (Codex, #2445 at 5729be15).
+                raise InputError(f"{sidecar} is binary (NUL byte); a .license sidecar must be text")
             report.skip("binary")
             continue
         lines, has_content = got
@@ -603,6 +618,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="rewrite the baseline from the current findings, then exit 0")
     ap.add_argument("--no-growth-against", metavar="REF", default=None,
                     help="fail (H011) on baseline entries absent from the baseline at REF")
+    ap.add_argument("--min-inspected", metavar="N", type=int, default=None,
+                    help=f"refuse a verdict (exit 2) over fewer than N inspected files; "
+                         f"overrides min-inspected in {CONFIG_NAME} (default there: 1)")
     args = ap.parse_args(argv)
     root = Path(args.root).resolve()
     try:
@@ -612,6 +630,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.no_growth_against:
             baseline_growth(root, load_config(root), args.no_growth_against, report)
+        floor = args.min_inspected if args.min_inspected is not None else load_config(root).min_inspected
+        if floor < 1:
+            raise InputError(f"--min-inspected must be >= 1, got {floor}")
+        if report.checked < floor:
+            raise InputError(f"inspected {report.checked} files, below the floor of {floor}: "
+                             f"refusing a verdict over a population this small (wrong --root, or the "
+                             f"tracked-file set collapsed)")
     except InputError as exc:
         print(f"check_headers: ERROR: {exc}", file=sys.stderr)
         return 2

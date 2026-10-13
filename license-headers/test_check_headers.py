@@ -637,6 +637,54 @@ class InputErrors(Fixture):
         self.assertEqual(self.run_checker().returncode, 2)
 
 
+class RoundSevenRegressions(Fixture):
+    """Codex + Claude review of #2445 at 5729be15: a binary sidecar must fail
+    closed, and neither a config floor nor a CLI floor may let a collapsed file
+    population read as clean (anti-vacuity, Claude W1)."""
+
+    def inspected(self) -> int:
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return int(r.stdout.split("inspected ", 1)[1].split(" ", 1)[0])
+
+    def config_with(self, line: str) -> None:
+        self.write(".license-headers.toml", CONFIG.format(form="d25") + line + "\n")
+
+    def test_headers_binary_sidecar_exits_2(self) -> None:
+        # Codex's reproduction: a headerless source file plus a NUL-byte sidecar.
+        self.write("src/new.rs", "fn new() {}\n")
+        (self.root / "src" / "new.rs.license").write_bytes(b"\0not a license\n")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("new.rs.license is binary", r.stderr)
+
+    def test_headers_population_below_config_floor_exits_2(self) -> None:
+        self.config_with(f"min-inspected = {self.inspected() + 1}")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("below the floor", r.stderr)
+
+    def test_headers_population_at_config_floor_passes(self) -> None:
+        self.config_with(f"min-inspected = {self.inspected()}")
+        self.assertClean()
+
+    def test_headers_population_below_cli_floor_exits_2(self) -> None:
+        r = self.run_checker("--min-inspected", str(self.inspected() + 1))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_headers_cli_floor_overrides_config_floor(self) -> None:
+        self.config_with("min-inspected = 100000")
+        self.assertEqual(self.run_checker("--min-inspected", "1").returncode, 0)
+
+    def test_headers_zero_or_malformed_floor_exits_2(self) -> None:
+        for bad in ("min-inspected = 0", "min-inspected = -3", 'min-inspected = "10"', "min-inspected = true"):
+            with self.subTest(bad=bad):
+                self.config_with(bad)
+                self.assertEqual(self.run_checker().returncode, 2, bad)
+        self.config_with("min-inspected = 1")
+        self.assertEqual(self.run_checker("--min-inspected", "0").returncode, 2)
+
+
 class Repository(unittest.TestCase):
     def test_this_repository_passes(self) -> None:
         r = subprocess.run([sys.executable, str(CHECKER), "--root", str(REPO)], capture_output=True, text=True)
