@@ -65,9 +65,12 @@ config also changed since REF (a rule change may legitimately surface old
 files; the growth is then printed).
 
 Exit codes: 0 = no findings; 1 = at least one finding (each printed);
-2 = inputs could not be read.
+2 = inputs could not be read, a .license sidecar is binary, or fewer files
+were inspected than the anti-vacuity floor (`min-inspected` in the config,
+default 1, or --min-inspected N): a clean verdict over a population that
+collapsed is refused rather than reported.
 
-Run: python3 scripts/check_headers.py [--root DIR] [--write-baseline]
+Run: python3 scripts/check_headers.py [--root DIR] [--write-baseline] [--min-inspected N]
 Standard library only (Python 3.11+, for tomllib).
 """
 
@@ -163,7 +166,8 @@ AI_RE = re.compile(_LEAD + r"(AI-USE:.*?)" + _TRAIL)
 # an upstream "All rights reserved", never our pre-D25 identifier.
 LEGACY_ID_RE = re.compile(_LEAD + r"SPDX-License-Identifier:.*\bLicenseRef-Proprietary\b")
 LEGACY_RE = re.compile(_LEAD + r"(?:SPDX-License-Identifier:.*\bLicenseRef-Proprietary\b"
-                       r"|(?:Copyright|\(c\)|©).*\bAll rights reserved\b)", re.IGNORECASE)
+                       r"|(?:Copyright|\(c\)|©).*\bAll rights reserved\b"
+                       r"|All rights reserved\.?" + _TRAIL + r")", re.IGNORECASE)
 # REUSE ignores everything between its Ignore-Start/End markers; so does this gate.
 # Split literals, so neither REUSE nor this file reads its own markers as markers.
 IGNORE_START, IGNORE_END = "REUSE-" "IgnoreStart", "REUSE-" "IgnoreEnd"
@@ -177,6 +181,7 @@ class Config:
     agpl_ai_use: str
     exempt: tuple[str, ...]
     baseline: str
+    min_inspected: int = 1
 
 
 @dataclass
@@ -190,6 +195,7 @@ class Annotation:
 class Report:
     findings: list[tuple[str, str, str]] = field(default_factory=list)  # (code, path, detail)
     checked: int = 0
+    third_party: int = 0  # inspected under the third-party rules (no D25 header required)
     skipped: dict[str, int] = field(default_factory=dict)
 
     def skip(self, why: str) -> None:
@@ -325,6 +331,12 @@ def load_config(root: Path) -> Config:
     baseline = data.get("baseline", "")
     if not isinstance(baseline, str):
         raise InputError(f"{CONFIG_NAME}: baseline must be a string path")
+    # Anti-vacuity floor: a verdict over fewer files than this is refused
+    # (exit 2), so a --root that resolves to the wrong subtree, or a tracked-file
+    # set that collapses, cannot read as clean. Never 0: absent means 1.
+    floor = data.get("min-inspected", 1)
+    if isinstance(floor, bool) or not isinstance(floor, int) or floor < 1:
+        raise InputError(f"{CONFIG_NAME}: min-inspected must be an integer >= 1, got {floor!r}")
     return Config(
         years=str(data["years"]),
         holder=str(data["holder"]),
@@ -332,6 +344,7 @@ def load_config(root: Path) -> Config:
         agpl_ai_use=form,
         exempt=tuple(exempt),
         baseline=baseline,
+        min_inspected=floor,
     )
 
 
@@ -416,7 +429,10 @@ def head_lines(path: Path, rel: str) -> tuple[list[str], bool] | None:
     if b"\0" in raw[:8000]:
         return None
     has_content = bool(raw.strip()) or more
-    lines = raw.decode("utf-8", "replace").splitlines()[:WINDOW]
+    text = raw.decode("utf-8", "replace")
+    if text.startswith("\ufeff"):
+        text = text[1:]  # a UTF-8 BOM is not part of line 1's comment opener
+    lines = text.splitlines()[:WINDOW]
     out, ignoring = [], False
     for line in lines:
         if IGNORE_START in line:
@@ -455,8 +471,9 @@ def inspect(lines: list[str], expected: str, third_party: bool, cfg: Config) -> 
     if len(copies) > 1 or len(lics) > 1 or len(ais) > 1:
         found.append(("H008", f"{len(copies)} copyright, {len(lics)} licence and {len(ais)} AI-USE lines"))
     if not copies and not lics and not ais:
-        if not legacy:
-            found.append(("H001", "no SPDX-FileCopyrightText, SPDX-License-Identifier or AI-USE line"))
+        # H001 fires even beside H006: a legacy-only file has no D25 header, and
+        # a single H006 baseline entry must not excuse that too.
+        found.append(("H001", "no SPDX-FileCopyrightText, SPDX-License-Identifier or AI-USE line"))
         return found
     if not (copies and lics and ais) or not (lics[0][0] == copies[0][0] + 1 and ais[0][0] == copies[0][0] + 2):
         have = [n for n, xs in (("copyright", copies), ("licence", lics), ("AI-USE", ais)) if xs]
@@ -481,17 +498,24 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
     tracked = set(files)
     raw: list[tuple[str, str, str]] = []
     for rel in files:
-        if glob_match(rel, BUILTIN_EXEMPT):
-            report.skip("REUSE.toml-only type (HEADER-SPEC section 5)")
-            continue
+        sidecar = rel + ".license"
+        # A tracked sidecar exists BECAUSE the file it describes cannot carry an
+        # inline header (a binary, a JSON vector, a corpus). So the sidecar puts
+        # that file in scope whatever its own type: the built-in REUSE.toml-only
+        # list and the comment-syntax test do not apply to it. The sidecar is
+        # itself skipped as `*.license` and is read here, through its file.
+        # Only an operator's explicit exempt glob still wins.
+        has_sidecar = sidecar in tracked and not rel.endswith(".license")
         if cfg.exempt and glob_match(rel, cfg.exempt):
             report.skip(f"exempt glob in {CONFIG_NAME}")
             continue
-        if not commentable(rel, root):
+        if not has_sidecar and glob_match(rel, BUILTIN_EXEMPT):
+            report.skip("REUSE.toml-only type (HEADER-SPEC section 5)")
+            continue
+        if not has_sidecar and not commentable(rel, root):
             report.skip("no known comment syntax")
             continue
-        sidecar = rel + ".license"
-        if sidecar in tracked:
+        if has_sidecar:
             # REUSE reads a .license sidecar INSTEAD of the file it describes.
             got = head_lines(root / sidecar, sidecar)
             source = f" (read from {sidecar})"
@@ -499,6 +523,10 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
             got = head_lines(root / rel, rel)
             source = ""
         if got is None:
+            if has_sidecar:
+                # A sidecar IS licence metadata; one that reads as binary is
+                # malformed, not exempt. Fail closed (Codex, #2445 at 5729be15).
+                raise InputError(f"{sidecar} is binary (NUL byte); a .license sidecar must be text")
             report.skip("binary")
             continue
         lines, has_content = got
@@ -507,6 +535,8 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
             continue
         report.checked += 1
         expected, third_party = resolve(rel, annotations, cfg)
+        if third_party:
+            report.third_party += 1
         for code, detail in inspect(lines, expected, third_party, cfg):
             raw.append((code, rel, detail + source))
     current = {(c, p) for c, p, _ in raw}
@@ -588,10 +618,22 @@ def main(argv: list[str] | None = None) -> int:
                     help="rewrite the baseline from the current findings, then exit 0")
     ap.add_argument("--no-growth-against", metavar="REF", default=None,
                     help="fail (H011) on baseline entries absent from the baseline at REF")
+    ap.add_argument("--min-inspected", metavar="N", type=int, default=None,
+                    help=f"refuse a verdict (exit 2) over fewer than N inspected files; "
+                         f"overrides min-inspected in {CONFIG_NAME} (default there: 1)")
     args = ap.parse_args(argv)
     root = Path(args.root).resolve()
     try:
         report, current = run(root, writing=args.write_baseline)
+        # The floor guards --write-baseline too: a collapsed population must not
+        # overwrite the baseline any more than it may pass the gate.
+        floor = args.min_inspected if args.min_inspected is not None else load_config(root).min_inspected
+        if floor < 1:
+            raise InputError(f"--min-inspected must be >= 1, got {floor}")
+        if report.checked < floor:
+            raise InputError(f"inspected {report.checked} files, below the floor of {floor}: "
+                             f"refusing a verdict over a population this small (wrong --root, or the "
+                             f"tracked-file set collapsed)")
         if args.write_baseline:
             print(f"check_headers: wrote {len(current)} entries to {write_baseline(root, current)}")
             return 0
@@ -601,9 +643,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"check_headers: ERROR: {exc}", file=sys.stderr)
         return 2
     skipped = ", ".join(f"{n} {why}" for why, n in sorted(report.skipped.items()))
-    print(f"check_headers: inspected {report.checked} files; not inspected: {skipped or 'none'}")
+    print(f"check_headers: inspected {report.checked} files ({report.third_party} under third-party rules, "
+          f"which require no D25 header); not inspected: {skipped or 'none'}")
     if not report.findings:
-        print("check_headers: every inspected file carries the D25 header its tier requires")
+        print(f"check_headers: no finding outside the baseline: {report.checked - report.third_party} "
+              f"checked against the D25 header rule, {report.third_party} against the third-party rule")
         return 0
     for code, rel, detail in report.findings:
         print(f"{code} {rel}: {CODES[code]} — {detail}")
