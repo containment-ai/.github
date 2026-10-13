@@ -524,6 +524,46 @@ class RoundFiveRegressions(Fixture):
         self.assertIn(", 2 against the third-party rule", r.stdout)
 
 
+class RoundSixRegressions(Fixture):
+    """Claude review of #2445 at 55433aeb, W1: a sidecar exists BECAUSE the file
+    it describes cannot carry a header, so a sidecar of a binary or REUSE.toml-only
+    file must be inspected. Before the fix both shapes below were skipped."""
+
+    SIDECAR_FULL = header(lead="").replace("\n ", "\n").lstrip()
+    SIDECAR_NO_AI = ("SPDX-FileCopyrightText: 2026 Containment.ai LLC\n"
+                     "SPDX-License-Identifier: LicenseRef-Containment-Commercial\n")
+
+    def write_png(self, rel: str) -> None:
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")
+
+    def test_headers_sidecar_of_binary_file_is_inspected(self) -> None:
+        self.write_png("assets/logo.png")
+        self.write("assets/logo.png.license", self.SIDECAR_NO_AI)
+        self.assertFinding("H002", "assets/logo.png")
+
+    def test_headers_sidecar_of_reuse_only_type_is_inspected(self) -> None:
+        # The production shape: hag-action-contract/testvectors/vectors.json.license.
+        self.write("vectors/vectors.json", "{}\n")
+        self.write("vectors/vectors.json.license", self.SIDECAR_NO_AI)
+        self.assertFinding("H002", "vectors/vectors.json")
+
+    def test_headers_complete_sidecar_of_binary_file_passes(self) -> None:
+        self.write_png("assets/logo.png")
+        self.write("assets/logo.png.license", self.SIDECAR_FULL)
+        self.assertClean()
+
+    def test_headers_sidecar_under_exempt_glob_stays_exempt(self) -> None:
+        self.write("records/blob.bin", "x\n")
+        self.write("records/blob.bin.license", self.SIDECAR_NO_AI)
+        self.assertClean()
+
+    def test_headers_binary_without_sidecar_is_still_skipped(self) -> None:
+        self.write_png("assets/logo.png")
+        self.assertClean()
+
+
 class Baseline(Fixture):
     def test_baselined_finding_is_excused(self) -> None:
         self.write("src/new.rs", "fn new() {}\n")

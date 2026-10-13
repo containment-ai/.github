@@ -487,17 +487,24 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
     tracked = set(files)
     raw: list[tuple[str, str, str]] = []
     for rel in files:
-        if glob_match(rel, BUILTIN_EXEMPT):
-            report.skip("REUSE.toml-only type (HEADER-SPEC section 5)")
-            continue
+        sidecar = rel + ".license"
+        # A tracked sidecar exists BECAUSE the file it describes cannot carry an
+        # inline header (a binary, a JSON vector, a corpus). So the sidecar puts
+        # that file in scope whatever its own type: the built-in REUSE.toml-only
+        # list and the comment-syntax test do not apply to it. The sidecar is
+        # itself skipped as `*.license` and is read here, through its file.
+        # Only an operator's explicit exempt glob still wins.
+        has_sidecar = sidecar in tracked and not rel.endswith(".license")
         if cfg.exempt and glob_match(rel, cfg.exempt):
             report.skip(f"exempt glob in {CONFIG_NAME}")
             continue
-        if not commentable(rel, root):
+        if not has_sidecar and glob_match(rel, BUILTIN_EXEMPT):
+            report.skip("REUSE.toml-only type (HEADER-SPEC section 5)")
+            continue
+        if not has_sidecar and not commentable(rel, root):
             report.skip("no known comment syntax")
             continue
-        sidecar = rel + ".license"
-        if sidecar in tracked:
+        if has_sidecar:
             # REUSE reads a .license sidecar INSTEAD of the file it describes.
             got = head_lines(root / sidecar, sidecar)
             source = f" (read from {sidecar})"
