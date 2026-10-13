@@ -832,6 +832,12 @@ class RoundEightRegressions(Fixture):
             self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b"baseline.txt\n"),
                               "show": (0, b""), "diff": (128, b"")})
 
+    def test_headers_growth_check_non_utf8_baseline_at_ref_is_input_error(self) -> None:
+        # Copilot review of #2464: the ref-side baseline was decoded with errors="replace".
+        with self.assertRaisesRegex(Exception, "is not UTF-8"):
+            self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b"baseline.txt\n"),
+                              "show": (0, b"H001 \xff\xfe.rs\n"), "diff": (0, b"")})
+
     def test_headers_growth_check_absent_baseline_is_first_adoption(self) -> None:
         _, report = self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b""), "show": (128, b""), "diff": (0, b"")})
         self.assertEqual(report.findings, [])

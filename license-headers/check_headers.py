@@ -642,7 +642,10 @@ def baseline_growth(root: Path, cfg: Config, ref: str, report: Report) -> None:
             if len(parts) == 2 and not parts[0].startswith("#"):
                 out.add((parts[0], parts[1]))
         return out
-    before = entries(shown.stdout.decode("utf-8", "replace"))
+    try:  # strict, like the working-tree read: a replaced byte could fake or hide an H011
+        before = entries(shown.stdout.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise InputError(f"--no-growth-against: {cfg.baseline} at {ref!r} is not UTF-8: {exc}") from exc
     now = entries(read_baseline_text(root / cfg.baseline, cfg.baseline))
     grown = sorted(now - before)
     if not grown:
