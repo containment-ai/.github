@@ -34,7 +34,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.11'
-      - run: pip install --require-hashes -r license-headers/requirements-reuse.txt
+      - run: pip install --require-hashes --force-reinstall -r license-headers/requirements-reuse.txt
       - name: check_headers.py mutation suite
         run: python license-headers/test_check_headers.py
       - name: check_reuse_lint.py mutation suite

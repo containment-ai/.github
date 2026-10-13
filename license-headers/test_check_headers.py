@@ -636,6 +636,15 @@ class InputErrors(Fixture):
         (self.root / "baseline.txt").unlink()
         self.assertEqual(self.run_checker().returncode, 2)
 
+    def test_headers_non_utf8_baseline_exits_2_not_traceback(self) -> None:
+        # Claude review of #2445 at 5d717ee1, W2: the baseline reads bypassed
+        # the InputError contract (exit 1 with a traceback instead of exit 2).
+        (self.root / "baseline.txt").write_bytes(b"# baseline\nH001 \xff\xfe.rs\n")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("baseline baseline.txt unreadable", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
 
 class RoundSevenRegressions(Fixture):
     """Codex + Claude review of #2445 at 5729be15: a binary sidecar must fail

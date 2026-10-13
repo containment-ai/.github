@@ -374,6 +374,15 @@ def load_config(root: Path) -> Config:
     )
 
 
+def read_baseline_text(path: Path, rel: str) -> str:
+    """The baseline's text; unreadable or not UTF-8 is an InputError (exit 2),
+    like every other input this module reads, never a traceback (exit 1)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InputError(f"baseline {rel} unreadable: {exc}") from exc
+
+
 def read_baseline(root: Path, cfg: Config, report: Report, writing: bool = False) -> set[tuple[str, str]]:
     entries: set[tuple[str, str]] = set()
     if not cfg.baseline:
@@ -383,7 +392,7 @@ def read_baseline(root: Path, cfg: Config, report: Report, writing: bool = False
         return entries  # --write-baseline is about to create it (first adoption)
     if not path.is_file():
         raise InputError(f"baseline {cfg.baseline} named in {CONFIG_NAME} does not exist")
-    for n, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for n, raw in enumerate(read_baseline_text(path, cfg.baseline).splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -611,7 +620,7 @@ def baseline_growth(root: Path, cfg: Config, ref: str, report: Report) -> None:
                 out.add((parts[0], parts[1]))
         return out
     before = entries(shown.stdout.decode("utf-8", "replace"))
-    now = entries((root / cfg.baseline).read_text(encoding="utf-8"))
+    now = entries(read_baseline_text(root / cfg.baseline, cfg.baseline))
     grown = sorted(now - before)
     if not grown:
         return
