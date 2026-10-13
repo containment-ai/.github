@@ -10,7 +10,9 @@
 # Hashes: every file PyPI lists for each pinned version (2026-10-12).
 # Every package in the closure is listed with `==`, so --require-hashes pins all
 # of it: a package already in the interpreter at another version does not
-# satisfy the pin and is downloaded (hash-checked).
+# satisfy the pin and is downloaded (hash-checked). One at the SAME version is
+# "already satisfied" and NOT hash-checked, so the workflows install with
+# --force-reinstall.
 # charset-normalizer is reuse's `charset-normalizer` extra: reuse refuses to start
 # without an encoding detector, and python-magic alone needs a system libmagic.
 

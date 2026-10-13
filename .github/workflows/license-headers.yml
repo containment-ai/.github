@@ -104,7 +104,9 @@ jobs:
           python-version: '3.11'
 
       - name: Install reuse 6.2.0 (hash-locked)
-        run: pip install --require-hashes -r license-tools/license-headers/requirements-reuse.txt
+        # --force-reinstall: pip skips, and never hash-checks, a requirement
+        # already satisfied at the pinned version in the runner's interpreter.
+        run: pip install --require-hashes --force-reinstall -r license-tools/license-headers/requirements-reuse.txt
 
       - name: reuse lint
         run: python license-tools/license-headers/check_reuse_lint.py --root caller
