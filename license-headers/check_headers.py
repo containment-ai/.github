@@ -187,6 +187,7 @@ class Config:
     min_inspected: int = 1
     max_no_syntax: int | None = None
     third_party_count: int | None = None
+    max_exempt: int | None = None
 
 
 @dataclass
@@ -356,7 +357,10 @@ def load_config(root: Path) -> Config:
     # reclassifies first-party paths cannot exempt them silently. Either one
     # mismatched is exit 2; changing it is a reviewed config diff.
     pins = {}
-    for key in ("max-uninspected-by-type", "third-party"):
+    # `max-exempt` caps the files dropped by the config's own exempt globs: a
+    # directory-name glob (**/fixtures/**) would otherwise let any new
+    # directory of that name leave the population unremarked.
+    for key in ("max-uninspected-by-type", "third-party", "max-exempt"):
         v = data.get(key)
         if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
             raise InputError(f"{CONFIG_NAME}: {key} must be an integer >= 0, got {v!r}")
@@ -371,6 +375,7 @@ def load_config(root: Path) -> Config:
         min_inspected=floor,
         max_no_syntax=pins["max-uninspected-by-type"],
         third_party_count=pins["third-party"],
+        max_exempt=pins["max-exempt"],
     )
 
 
@@ -550,6 +555,11 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
         # itself skipped as `*.license` and is read here, through its file.
         # Only an operator's explicit exempt glob still wins.
         has_sidecar = sidecar in tracked and not rel.endswith(".license")
+        if rel.endswith(".license") and rel[: -len(".license")] not in tracked:
+            # An orphan sidecar describes nothing, so nothing reads it through
+            # its file and the `*.license` skip below would hide it entirely.
+            # Malformed licence metadata: fail closed, like a binary sidecar.
+            raise InputError(f"{rel} is a .license sidecar whose file {rel[: -len('.license')]} is not tracked")
         if cfg.exempt and glob_match(rel, cfg.exempt):
             report.skip(f"exempt glob in {CONFIG_NAME}")
             continue
@@ -605,9 +615,14 @@ def baseline_growth(root: Path, cfg: Config, ref: str, report: Report) -> None:
     if not cfg.baseline:
         return
     git = ["git", "-C", str(root)]
-    shown = subprocess.run(git + ["show", f"{ref}:{cfg.baseline}"], capture_output=True)
+    def run_git(args: list[str]) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(git + args, capture_output=True)
+        except OSError as exc:  # git missing or not executable: exit 2, not a traceback
+            raise InputError(f"--no-growth-against: cannot run git: {exc}") from exc
+    shown = run_git(["show", f"{ref}:{cfg.baseline}"])
     if shown.returncode != 0:
-        exists = subprocess.run(git + ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], capture_output=True)
+        exists = run_git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
         if exists.returncode != 0:
             raise InputError(f"--no-growth-against: {ref!r} is not a commit")
         print(f"check_headers: no baseline at {ref}; growth check skipped (first adoption)")
@@ -630,7 +645,7 @@ def baseline_growth(root: Path, cfg: Config, ref: str, report: Report) -> None:
         rules.append(str(script.relative_to(root.resolve())))
     except ValueError:
         pass  # the script lives outside the checked repository (org workflow)
-    changed = subprocess.run(git + ["diff", "--quiet", ref, "--", *rules], capture_output=True)
+    changed = run_git(["diff", "--quiet", ref, "--", *rules])
     if changed.returncode == 1:
         print(f"check_headers: baseline grew by {len(grown)} entr{'y' if len(grown) == 1 else 'ies'} "
               f"since {ref}, allowed because {' or '.join(rules)} changed too:")
@@ -681,6 +696,11 @@ def main(argv: list[str] | None = None) -> int:
         floor = args.min_inspected if args.min_inspected is not None else load_config(root).min_inspected
         if floor < 1:
             raise InputError(f"--min-inspected must be >= 1, got {floor}")
+        exempted = report.skipped.get(f"exempt glob in {CONFIG_NAME}", 0)
+        if load_config(root).max_exempt is not None and exempted > load_config(root).max_exempt:
+            raise InputError(f"{exempted} files skipped by exempt globs, above max-exempt = "
+                             f"{load_config(root).max_exempt} in {CONFIG_NAME}: a new directory matched an "
+                             f"exempt glob; narrow the glob or raise the cap in a reviewed diff")
         if report.checked < floor:
             raise InputError(f"inspected {report.checked} files, below the floor of {floor}: "
                              f"refusing a verdict over a population this small (wrong --root, or the "

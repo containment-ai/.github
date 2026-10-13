@@ -30,6 +30,7 @@ Shared licence checks for containment-ai repositories, run by the reusable workf
    min-inspected = 100                 # optional anti-vacuity floor; default 1, never 0
    max-uninspected-by-type = 40        # optional cap on files skipped for no comment syntax
    third-party = 0                     # optional exact count of paths under third-party rules
+   max-exempt = 10                     # optional cap on files dropped by the exempt globs
    ```
 
    Fewer inspected files than `min-inspected` is exit 2, so a check pointed at the
@@ -39,7 +40,10 @@ Shared licence checks for containment-ai repositories, run by the reusable workf
    working tree, so gitignore anything an earlier CI step writes into it. The two
    optional pins are exit 2 on mismatch: more skipped-by-type files than the cap means
    a commentable type the checker does not know yet, and a different third-party count
-   means a `REUSE.toml` change reclassified paths that then need no header.
+   means a `REUSE.toml` change reclassified paths that then need no header. More files
+   under the exempt globs than `max-exempt` means a new directory matched one (a
+   `**/fixtures/**` glob matches that name anywhere). A `.license` sidecar whose file is
+   no longer tracked is exit 2.
 
    The baseline excuses one finding code on one file. It only shrinks: an entry that
    no longer matches a finding fails the check. The reusable workflow also passes
