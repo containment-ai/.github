@@ -438,6 +438,15 @@ def commentable(path: str, root: Path | None = None) -> bool:
     return False
 
 
+def is_binary(path: Path, rel: str) -> bool:
+    """The same NUL-byte test head_lines() uses; unreadable is an InputError."""
+    try:
+        with path.open("rb") as fh:
+            return b"\0" in fh.read(8000)
+    except OSError as exc:
+        raise InputError(f"cannot read {rel}: {exc}") from exc
+
+
 def head_lines(path: Path, rel: str) -> tuple[list[str], bool] | None:
     """(first WINDOW lines with REUSE-Ignore blocks blanked, file has content).
 
@@ -539,7 +548,13 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
             report.skip("REUSE.toml-only type (HEADER-SPEC section 5)")
             continue
         if not has_sidecar and not commentable(rel, root):
-            report.skip(NO_SYNTAX, rel)
+            # A binary has no comment syntax by nature; only TEXT of an unknown
+            # type counts toward max-uninspected-by-type (a new commentable
+            # type is what the cap exists to catch, not a new image).
+            if is_binary(root / rel, rel):
+                report.skip("binary")
+            else:
+                report.skip(NO_SYNTAX, rel)
             continue
         if has_sidecar:
             # REUSE reads a .license sidecar INSTEAD of the file it describes.

@@ -699,6 +699,16 @@ class RoundSevenRegressions(Fixture):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("tools/build.gradle", r.stderr)
 
+    def test_headers_binary_of_unknown_type_does_not_count_toward_cap(self) -> None:
+        # Codex connector on containment-ai/.github#8: a tracked image is not a
+        # commentable type the checker is missing, so it must not trip the cap.
+        n = self.skipped_by_type()
+        self.config_with(f"max-uninspected-by-type = {n}")
+        p = self.root / "assets" / "photo.webp"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"RIFF\0\0\0\0WEBPVP8 ")
+        self.assertClean()
+
     def test_headers_third_party_population_mismatch_exits_2(self) -> None:
         # Claude review W2 at b4706986: a REUSE.toml edit that makes first-party
         # paths read as third-party must not exempt them silently.
