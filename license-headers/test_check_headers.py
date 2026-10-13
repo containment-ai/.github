@@ -25,6 +25,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent
 REPO = SCRIPTS.parent
@@ -744,6 +745,101 @@ class RoundSevenRegressions(Fixture):
                 self.assertEqual(self.run_checker().returncode, 2, bad)
         self.config_with("min-inspected = 1")
         self.assertEqual(self.run_checker("--min-inspected", "0").returncode, 2)
+
+
+class RoundEightRegressions(Fixture):
+    """Claude review of #2445 at 567cd0a5: the exempt-glob population had no
+    pin, an orphan .license sidecar was checked by nothing, and a git failure
+    inside the growth check leaked as a traceback (exit 1) instead of exit 2."""
+
+    def config_with(self, line: str) -> None:
+        self.write(".license-headers.toml", CONFIG.format(form="d25") + line + "\n")
+
+    def exempted(self) -> int:
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return int(r.stdout.split(" exempt glob", 1)[0].rsplit(" ", 1)[1])
+
+    def test_headers_exempt_population_above_cap_exits_2(self) -> None:
+        n = self.exempted()
+        self.config_with(f"max-exempt = {n}")
+        self.assertClean()
+        self.write("records/new-dir/file.yaml", "k: 1\n")  # records/** is exempt
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("max-exempt", r.stderr)
+
+    def test_headers_malformed_max_exempt_exits_2(self) -> None:
+        for bad in ("max-exempt = 1000.0", "max-exempt = -1", 'max-exempt = "9"'):
+            with self.subTest(bad=bad):
+                self.config_with(bad)
+                self.assertEqual(self.run_checker().returncode, 2, bad)
+
+    def test_headers_orphan_sidecar_exits_2(self) -> None:
+        self.write("assets/gone.bin.license", "SPDX-License-Identifier: MIT\n")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("assets/gone.bin.license", r.stderr)
+
+    def test_headers_growth_check_git_failure_is_input_error(self) -> None:
+        sys.path.insert(0, str(CHECKER.parent))
+        self.addCleanup(sys.path.remove, str(CHECKER.parent))
+        prev, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+        try:
+            import check_headers
+        finally:
+            sys.dont_write_bytecode = prev
+        cfg = check_headers.Config(years="2026", holder="H", default_expression="X", agpl_ai_use="d25",
+                                   exempt=(), baseline="baseline.txt")
+        with mock.patch.object(check_headers.subprocess, "run", side_effect=FileNotFoundError("git")):
+            with self.assertRaises(check_headers.InputError):
+                check_headers.baseline_growth(self.root, cfg, "HEAD", check_headers.Report())
+
+    def growth_with(self, rcs: dict[str, tuple[int, bytes]]):
+        """Run baseline_growth with git faked per subcommand: {subcmd: (rc, stdout)}."""
+        sys.path.insert(0, str(CHECKER.parent))
+        self.addCleanup(sys.path.remove, str(CHECKER.parent))
+        prev, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+        try:
+            import check_headers
+        finally:
+            sys.dont_write_bytecode = prev
+        self.write("baseline.txt", "H001 src/new.rs\n")
+        cfg = check_headers.Config(years="2026", holder="H", default_expression="X", agpl_ai_use="d25",
+                                   exempt=(), baseline="baseline.txt")
+        def fake(cmd, **kw):
+            rc, out = rcs[cmd[3]]  # cmd = ["git", "-C", root, <subcommand>, ...]
+            return subprocess.CompletedProcess(cmd, rc, out, b"")
+        report = check_headers.Report()
+        with mock.patch.object(check_headers.subprocess, "run", side_effect=fake):
+            check_headers.baseline_growth(self.root, cfg, "HEAD", report)
+        return check_headers, report
+
+    def test_headers_growth_check_unreadable_baseline_blob_is_input_error(self) -> None:
+        # Codex connector on containment-ai/.github#10: git starts, the path is in
+        # the tree, but `git show` fails (corrupt object). That must not read as
+        # "no baseline at ref" (which skipped H011 and passed).
+        with self.assertRaisesRegex(Exception, "cannot be read"):
+            self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b"baseline.txt\n"),
+                              "show": (128, b""), "diff": (0, b"")})
+
+    def test_headers_growth_check_unreadable_tree_is_input_error(self) -> None:
+        with self.assertRaisesRegex(Exception, "cannot read the tree"):
+            self.growth_with({"rev-parse": (0, b""), "ls-tree": (128, b""), "show": (128, b""), "diff": (0, b"")})
+
+    def test_headers_growth_check_failed_diff_is_input_error(self) -> None:
+        with self.assertRaisesRegex(Exception, "git diff against"):
+            self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b"baseline.txt\n"),
+                              "show": (0, b""), "diff": (128, b"")})
+
+    def test_headers_growth_check_absent_baseline_is_first_adoption(self) -> None:
+        _, report = self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b""), "show": (128, b""), "diff": (0, b"")})
+        self.assertEqual(report.findings, [])
+
+    def test_headers_growth_check_new_entry_is_h011(self) -> None:
+        _, report = self.growth_with({"rev-parse": (0, b""), "ls-tree": (0, b"baseline.txt\n"),
+                                      "show": (0, b""), "diff": (0, b"")})
+        self.assertEqual([c for c, _, _ in report.findings], ["H011"])
 
 
 class Repository(unittest.TestCase):
