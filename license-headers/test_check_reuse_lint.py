@@ -10,6 +10,7 @@ SW-REQ-SC-014. The wrapper must never report a pass it did not measure:
   * reuse absent, the wrong version, or no version line  -> exit 2
   * reuse exits 0 without its compliance line            -> exit 2
   * a PASS without its file counts, or below --min-files  -> exit 2
+  * license-expression / boolean.py differ from the lock   -> exit 2
   * a REAL reuse run on a tree with a missing licence    -> exit 1
   * CONTROL: a real run on a compliant tree              -> exit 0
   * REPOSITORY: a real run on this repository            -> exit 0
@@ -30,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -149,6 +151,59 @@ class FakeReuse(unittest.TestCase):
     def test_reuse_lint_zero_min_files_exits_2(self) -> None:
         r = run("--min-files", "0", "--reuse-cmd", self.fake("reuse, version 6.2.0", 0, PASS_OUT))
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+
+class Closure(unittest.TestCase):
+    """Claude review W3 at b4706986: license-expression and boolean.py decide the
+    verdict too, so their versions are asserted against the lock at gate time."""
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(SCRIPTS))
+        self.addCleanup(sys.path.remove, str(SCRIPTS))
+        # No __pycache__ in the checked repository: a .pyc left behind is an
+        # unlicensed file to reuse lint (the org copy's repo does not ignore it).
+        prev, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+        try:
+            import check_reuse_lint
+        finally:
+            sys.dont_write_bytecode = prev
+        self.mod = check_reuse_lint
+        lock = self.mod.lock_file()
+        self.assertIsNotNone(lock)
+        self.pins = {}
+        for line in lock.read_text(encoding="utf-8").splitlines():
+            name, _, rest = line.strip().partition("==")
+            if rest:
+                self.pins[name.lower()] = rest.split()[0]
+
+    def patched(self, versions: dict[str, str | None]):
+        import importlib.metadata as md
+        def version(name: str) -> str:
+            v = versions.get(name)
+            if v is None:
+                raise md.PackageNotFoundError(name)
+            return v
+        return mock.patch("importlib.metadata.version", side_effect=version)
+
+    def test_reuse_lint_locked_closure_is_accepted(self) -> None:
+        with self.patched({n: self.pins[n.lower()] for n in self.mod.CLOSURE}):
+            self.assertIsNone(self.mod.closure_mismatch())
+
+    def test_reuse_lint_other_license_expression_is_refused(self) -> None:
+        v = {n: self.pins[n.lower()] for n in self.mod.CLOSURE}
+        v["license-expression"] = "0.0.1"
+        with self.patched(v):
+            self.assertIn("license-expression 0.0.1 installed", self.mod.closure_mismatch() or "")
+
+    def test_reuse_lint_missing_boolean_py_is_refused(self) -> None:
+        v = {n: self.pins[n.lower()] for n in self.mod.CLOSURE}
+        v["boolean.py"] = None
+        with self.patched(v):
+            self.assertIn("boolean.py is not installed", self.mod.closure_mismatch() or "")
+
+    def test_reuse_lint_missing_lock_file_is_refused(self) -> None:
+        with mock.patch.object(self.mod, "lock_file", return_value=None):
+            self.assertIn("no lock file", self.mod.closure_mismatch() or "")
 
 
 class RealReuse(unittest.TestCase):

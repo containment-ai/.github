@@ -684,6 +684,40 @@ class RoundSevenRegressions(Fixture):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertEqual((self.root / "baseline.txt").read_text(encoding="utf-8"), before)
 
+    def skipped_by_type(self) -> int:
+        r = self.run_checker()
+        return int(r.stdout.split(" no known comment syntax", 1)[0].rsplit(" ", 1)[1])
+
+    def test_headers_uninspected_type_above_cap_exits_2(self) -> None:
+        # Claude review W1 at b4706986: a commentable type the checker does not
+        # know (here .gradle) is skipped; the cap turns that into exit 2.
+        n = self.skipped_by_type()
+        self.config_with(f"max-uninspected-by-type = {n}")
+        self.assertClean()
+        self.write("tools/build.gradle", "apply plugin: 'java'\n")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("tools/build.gradle", r.stderr)
+
+    def test_headers_third_party_population_mismatch_exits_2(self) -> None:
+        # Claude review W2 at b4706986: a REUSE.toml edit that makes first-party
+        # paths read as third-party must not exempt them silently.
+        self.config_with("third-party = 2")
+        self.assertClean()  # vendor/upstream/lib.js + vendor/closest/util.js
+        self.config_with("third-party = 3")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("third-party = 3", r.stderr)
+
+    def test_headers_malformed_population_pin_exits_2(self) -> None:
+        # 2.0 equals the fixture's third-party count and 1000.0 exceeds its skips,
+        # so only type validation can reject them (the rest fail later anyway).
+        for bad in ("third-party = 2.0", "max-uninspected-by-type = 1000.0",
+                    "third-party = -1", 'third-party = "7"', "max-uninspected-by-type = true"):
+            with self.subTest(bad=bad):
+                self.config_with(bad)
+                self.assertEqual(self.run_checker().returncode, 2, bad)
+
     def test_headers_zero_or_malformed_floor_exits_2(self) -> None:
         for bad in ("min-inspected = 0", "min-inspected = -3", 'min-inspected = "10"', "min-inspected = true"):
             with self.subTest(bad=bad):

@@ -68,7 +68,10 @@ Exit codes: 0 = no findings; 1 = at least one finding (each printed);
 2 = inputs could not be read, a .license sidecar is binary, or fewer files
 were inspected than the anti-vacuity floor (`min-inspected` in the config,
 default 1, or --min-inspected N): a clean verdict over a population that
-collapsed is refused rather than reported.
+collapsed is refused rather than reported. Also exit 2 when an optional
+population pin in the config does not hold: more files skipped for having no
+known comment syntax than `max-uninspected-by-type`, or a third-party count
+other than `third-party`.
 
 Run: python3 scripts/check_headers.py [--root DIR] [--write-baseline] [--min-inspected N]
 Standard library only (Python 3.11+, for tomllib).
@@ -182,6 +185,8 @@ class Config:
     exempt: tuple[str, ...]
     baseline: str
     min_inspected: int = 1
+    max_no_syntax: int | None = None
+    third_party_count: int | None = None
 
 
 @dataclass
@@ -197,13 +202,20 @@ class Report:
     checked: int = 0
     third_party: int = 0  # inspected under the third-party rules (no D25 header required)
     skipped: dict[str, int] = field(default_factory=dict)
+    third_party_paths: list[str] = field(default_factory=list)
+    no_syntax_paths: list[str] = field(default_factory=list)
 
-    def skip(self, why: str) -> None:
+    def skip(self, why: str, rel: str | None = None) -> None:
         self.skipped[why] = self.skipped.get(why, 0) + 1
+        if why == NO_SYNTAX and rel is not None:
+            self.no_syntax_paths.append(rel)
 
 
 class InputError(Exception):
     pass
+
+
+NO_SYNTAX = "no known comment syntax"
 
 
 # --- REUSE.toml ---------------------------------------------------------------
@@ -337,6 +349,18 @@ def load_config(root: Path) -> Config:
     floor = data.get("min-inspected", 1)
     if isinstance(floor, bool) or not isinstance(floor, int) or floor < 1:
         raise InputError(f"{CONFIG_NAME}: min-inspected must be an integer >= 1, got {floor!r}")
+    # Population pins (optional). `max-uninspected-by-type` caps the files skipped
+    # because their type has no known comment syntax, so a new commentable type
+    # cannot escape the header rule unnoticed; `third-party` is the exact number
+    # of inspected paths under third-party rules, so a REUSE.toml edit that
+    # reclassifies first-party paths cannot exempt them silently. Either one
+    # mismatched is exit 2; changing it is a reviewed config diff.
+    pins = {}
+    for key in ("max-uninspected-by-type", "third-party"):
+        v = data.get(key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+            raise InputError(f"{CONFIG_NAME}: {key} must be an integer >= 0, got {v!r}")
+        pins[key] = v
     return Config(
         years=str(data["years"]),
         holder=str(data["holder"]),
@@ -345,6 +369,8 @@ def load_config(root: Path) -> Config:
         exempt=tuple(exempt),
         baseline=baseline,
         min_inspected=floor,
+        max_no_syntax=pins["max-uninspected-by-type"],
+        third_party_count=pins["third-party"],
     )
 
 
@@ -513,7 +539,7 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
             report.skip("REUSE.toml-only type (HEADER-SPEC section 5)")
             continue
         if not has_sidecar and not commentable(rel, root):
-            report.skip("no known comment syntax")
+            report.skip(NO_SYNTAX, rel)
             continue
         if has_sidecar:
             # REUSE reads a .license sidecar INSTEAD of the file it describes.
@@ -537,6 +563,7 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
         expected, third_party = resolve(rel, annotations, cfg)
         if third_party:
             report.third_party += 1
+            report.third_party_paths.append(rel)
         for code, detail in inspect(lines, expected, third_party, cfg):
             raw.append((code, rel, detail + source))
     current = {(c, p) for c, p, _ in raw}
@@ -634,6 +661,18 @@ def main(argv: list[str] | None = None) -> int:
             raise InputError(f"inspected {report.checked} files, below the floor of {floor}: "
                              f"refusing a verdict over a population this small (wrong --root, or the "
                              f"tracked-file set collapsed)")
+        cfg = load_config(root)
+        n = len(report.no_syntax_paths)
+        if cfg.max_no_syntax is not None and n > cfg.max_no_syntax:
+            raise InputError(f"{n} files skipped as '{NO_SYNTAX}', above max-uninspected-by-type = "
+                             f"{cfg.max_no_syntax} in {CONFIG_NAME}: classify the new type (add its comment "
+                             f"syntax to the checker) or raise the cap in a reviewed diff. First paths: "
+                             + ", ".join(sorted(report.no_syntax_paths)[:20]))
+        if cfg.third_party_count is not None and report.third_party != cfg.third_party_count:
+            raise InputError(f"{report.third_party} paths under third-party rules, but {CONFIG_NAME} pins "
+                             f"third-party = {cfg.third_party_count}: a REUSE.toml change reclassified paths "
+                             f"(third-party files need no D25 header). Paths: "
+                             + ", ".join(sorted(report.third_party_paths)[:20]))
         if args.write_baseline:
             print(f"check_headers: wrote {len(current)} entries to {write_baseline(root, current)}")
             return 0

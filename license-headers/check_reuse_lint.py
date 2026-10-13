@@ -22,7 +22,9 @@ Exit codes: 0 = compliant; 1 = `reuse lint` reported non-compliance (its
 report is printed); 2 = reuse is missing, the wrong version, or did not run.
 
 Exit 2 also when a PASS lacks reuse's file counts, or counts fewer files
-than --min-files (anti-vacuity: a verdict over nothing is not a pass).
+than --min-files (anti-vacuity: a verdict over nothing is not a pass), and,
+when reuse runs in this interpreter (no --reuse-cmd), when license-expression
+or boolean.py differs from the version the lock file pins.
 
 Run: python3 scripts/check_reuse_lint.py [--root DIR] [--reuse-cmd CMD] [--min-files N]
 Install: pip install --require-hashes -r <that lock file>
@@ -39,6 +41,11 @@ import sys
 from pathlib import Path
 
 PINNED = "6.2.0"
+# reuse's verdict also depends on these two (they decide which SPDX identifiers
+# and expressions are valid). Their versions are read from the hash-locked lock
+# file and asserted in this interpreter, so a plain `pip install reuse==6.2.0`
+# with a different closure is exit 2, not a PASS (Claude review W3, #2445).
+CLOSURE = ("license-expression", "boolean.py")
 LOCK_CANDIDATES = ("requirements-reuse.txt", "../.github/requirements/requirements-reuse.txt")
 
 
@@ -49,6 +56,39 @@ def install_hint() -> str:
         if lock.is_file():
             return f"pip install --require-hashes -r {lock}"
     return f"pip install reuse=={PINNED} (hash-locked)"
+
+
+def lock_file() -> Path | None:
+    here = Path(__file__).resolve().parent
+    for rel in LOCK_CANDIDATES:
+        lock = (here / rel).resolve()
+        if lock.is_file():
+            return lock
+    return None
+
+
+def closure_mismatch() -> str | None:
+    """None when this interpreter's closure matches the lock, else why not."""
+    import importlib.metadata as md
+    lock = lock_file()
+    if lock is None:
+        return "no lock file (requirements-reuse.txt) found next to the script"
+    pins = {}
+    for line in lock.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^([A-Za-z0-9_.-]+)==(\S+)", line.strip())
+        if m:
+            pins[m.group(1).lower()] = m.group(2)
+    for name in CLOSURE:
+        want = pins.get(name.lower())
+        if want is None:
+            return f"{lock} pins no {name}"
+        try:
+            have = md.version(name)
+        except md.PackageNotFoundError:
+            return f"{name} is not installed (lock pins {want})"
+        if have != want:
+            return f"{name} {have} installed, the lock pins {want}"
+    return None
 
 
 # The version must END the banner line: `6.2.0.dev1` or `6.2.0.post1` is a
@@ -95,6 +135,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"check_reuse_lint: ERROR: reuse {m.group(1)} found, the gate is pinned to {PINNED}. "
               f"Install it: {install_hint()}", file=sys.stderr)
         return 2
+    if args.reuse_cmd is None:
+        # The closure check needs the interpreter that runs reuse, which is this
+        # one by default. --reuse-cmd (a test hook) names some other process.
+        why = closure_mismatch()
+        if why:
+            print(f"check_reuse_lint: ERROR: {why}. Install the locked closure: {install_hint()}", file=sys.stderr)
+            return 2
 
     try:
         lint = subprocess.run(cmd + ["--root", root, "lint"], capture_output=True, text=True, timeout=1800, env=env)
