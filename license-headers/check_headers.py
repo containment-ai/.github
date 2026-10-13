@@ -625,11 +625,8 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root).resolve()
     try:
         report, current = run(root, writing=args.write_baseline)
-        if args.write_baseline:
-            print(f"check_headers: wrote {len(current)} entries to {write_baseline(root, current)}")
-            return 0
-        if args.no_growth_against:
-            baseline_growth(root, load_config(root), args.no_growth_against, report)
+        # The floor guards --write-baseline too: a collapsed population must not
+        # overwrite the baseline any more than it may pass the gate.
         floor = args.min_inspected if args.min_inspected is not None else load_config(root).min_inspected
         if floor < 1:
             raise InputError(f"--min-inspected must be >= 1, got {floor}")
@@ -637,6 +634,11 @@ def main(argv: list[str] | None = None) -> int:
             raise InputError(f"inspected {report.checked} files, below the floor of {floor}: "
                              f"refusing a verdict over a population this small (wrong --root, or the "
                              f"tracked-file set collapsed)")
+        if args.write_baseline:
+            print(f"check_headers: wrote {len(current)} entries to {write_baseline(root, current)}")
+            return 0
+        if args.no_growth_against:
+            baseline_growth(root, load_config(root), args.no_growth_against, report)
     except InputError as exc:
         print(f"check_headers: ERROR: {exc}", file=sys.stderr)
         return 2

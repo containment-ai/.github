@@ -676,6 +676,14 @@ class RoundSevenRegressions(Fixture):
         self.config_with("min-inspected = 100000")
         self.assertEqual(self.run_checker("--min-inspected", "1").returncode, 0)
 
+    def test_headers_write_baseline_below_floor_exits_2_and_keeps_baseline(self) -> None:
+        # Codex connector on containment-ai/.github#7 at 5b0f05c8.
+        before = (self.root / "baseline.txt").read_text(encoding="utf-8")
+        self.config_with(f"min-inspected = {self.inspected() + 1}")
+        r = self.run_checker("--write-baseline")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual((self.root / "baseline.txt").read_text(encoding="utf-8"), before)
+
     def test_headers_zero_or_malformed_floor_exits_2(self) -> None:
         for bad in ("min-inspected = 0", "min-inspected = -3", 'min-inspected = "10"', "min-inspected = true"):
             with self.subTest(bad=bad):
