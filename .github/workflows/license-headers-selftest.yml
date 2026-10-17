@@ -40,6 +40,8 @@ jobs:
         run: python license-headers/test_check_headers.py
       - name: check_reuse_lint.py mutation suite
         run: python license-headers/test_check_reuse_lint.py
+      - name: gate_mode.py suite (mode=report fails on a crash)
+        run: python license-headers/test_gate_mode.py
 
   dogfood:
     name: Reusable workflow on this repository

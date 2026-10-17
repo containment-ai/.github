@@ -61,8 +61,10 @@ on:
           "enforce" (default) fails the job on any finding. "report" prints the
           same findings, adds a warning annotation and passes, for a repository
           adopting the check before its tree is clean. It downgrades exit 1
-          (findings) only: exit 2 (the check could not measure, or was
-          misconfigured) still fails in either mode.
+          only when the tool printed its findings verdict
+          (license-headers/gate_mode.py): a crash, which also exits 1, and
+          exit 2 (the check could not measure, or was misconfigured) still
+          fail in either mode.
         type: string
         default: enforce
 
@@ -128,14 +130,9 @@ jobs:
       - name: reuse lint
         env:
           RUN_MODE: ${{ inputs.mode }}
-        run: |
-          rc=0
-          python license-tools/license-headers/check_reuse_lint.py --root caller || rc=$?
-          if [ "$rc" = 1 ] && [ "$RUN_MODE" = report ]; then
-            echo "::warning::reuse lint: the caller is not REUSE 3.3 compliant (report above). mode=report, so this does not fail the job."
-            exit 0
-          fi
-          exit "$rc"
+        # gate_mode.py applies the mode: report downgrades exit 1 only when the
+        # tool printed its findings verdict, never a crash (also exit 1).
+        run: python license-tools/license-headers/gate_mode.py --mode "$RUN_MODE" license-tools/license-headers/check_reuse_lint.py --root caller
 
       - name: Per-file header check
         env:
@@ -185,15 +182,10 @@ jobs:
               echo "::notice::baseline-growth: no base commit for event '$EVENT', so H011 did not run"
             fi
           fi
-          rc=0
+          gate="python license-tools/license-headers/gate_mode.py --mode $RUN_MODE license-tools/license-headers/check_headers.py"
           if [ -n "$base" ]; then
             echo "header check: baseline growth compared against $base ($EVENT)"
-            python license-tools/license-headers/check_headers.py --root caller --no-growth-against "$base" || rc=$?
+            $gate --root caller --no-growth-against "$base"
           else
-            python license-tools/license-headers/check_headers.py --root caller || rc=$?
+            $gate --root caller
           fi
-          if [ "$rc" = 1 ] && [ "$RUN_MODE" = report ]; then
-            echo "::warning::per-file header check: findings (listed above). mode=report, so this does not fail the job."
-            exit 0
-          fi
-          exit "$rc"

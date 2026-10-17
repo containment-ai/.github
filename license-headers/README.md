@@ -54,8 +54,9 @@ Shared licence checks for containment-ai repositories, run by the reusable workf
 
 While a repository still has findings, the caller can pass `mode: report`: the
 workflow prints the same findings and a warning annotation, and the job passes.
-Only exit 1 (findings) is downgraded; exit 2 (could not measure, or misconfigured)
-still fails. The default, `mode: enforce`, fails on any finding. Drop `mode: report`
+Only a findings verdict is downgraded: `gate_mode.py` passes exit 1 only when the tool's
+last stderr line is its findings summary, so a crash (an unhandled exception also exits
+1) still fails, as does exit 2 (could not measure, or misconfigured). The default, `mode: enforce`, fails on any finding. Drop `mode: report`
 once the tree is clean.
 
 Adding a caller does not make the check required. That is a ruleset change in the
