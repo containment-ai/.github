@@ -22,6 +22,9 @@ name: License headers (reusable)
 #   jobs:
 #     license-headers:
 #       uses: containment-ai/.github/.github/workflows/license-headers.yml@<sha>
+#       # with:
+#       #   mode: report    # while a repository still has findings: report
+#       #                   # them as warnings instead of failing
 #
 # The tool files are checked out from THIS workflow's own repository at THIS
 # workflow's own commit (job.workflow_repository / job.workflow_sha), so pinning
@@ -53,6 +56,15 @@ on:
           checkout, it is skipped with a notice. "off" skips it.
         type: string
         default: "on"
+      mode:
+        description: >-
+          "enforce" (default) fails the job on any finding. "report" prints the
+          same findings, adds a warning annotation and passes, for a repository
+          adopting the check before its tree is clean. It downgrades exit 1
+          (findings) only: exit 2 (the check could not measure, or was
+          misconfigured) still fails in either mode.
+        type: string
+        default: enforce
 
 permissions:
   contents: read
@@ -68,7 +80,12 @@ jobs:
           WF_REPO: ${{ job.workflow_repository }}
           WF_SHA: ${{ job.workflow_sha }}
           EVENT: ${{ github.event_name }}
+          RUN_MODE: ${{ inputs.mode }}
         run: |
+          case "$RUN_MODE" in
+            enforce|report) echo "mode: $RUN_MODE" ;;
+            *) echo "::error::mode must be enforce or report, got '$RUN_MODE'"; exit 2 ;;
+          esac
           if [ -z "$WF_REPO" ] || [ -z "$WF_SHA" ]; then
             echo "::error::job.workflow_repository / job.workflow_sha are empty; refusing to fetch the tools from an unpinned ref"
             exit 2
@@ -109,7 +126,16 @@ jobs:
         run: pip install --require-hashes --force-reinstall -r license-tools/license-headers/requirements-reuse.txt
 
       - name: reuse lint
-        run: python license-tools/license-headers/check_reuse_lint.py --root caller
+        env:
+          RUN_MODE: ${{ inputs.mode }}
+        run: |
+          rc=0
+          python license-tools/license-headers/check_reuse_lint.py --root caller || rc=$?
+          if [ "$rc" = 1 ] && [ "$RUN_MODE" = report ]; then
+            echo "::warning::reuse lint: the caller is not REUSE 3.3 compliant (report above). mode=report, so this does not fail the job."
+            exit 0
+          fi
+          exit "$rc"
 
       - name: Per-file header check
         env:
@@ -119,6 +145,7 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           MG_BASE: ${{ github.event.merge_group.base_sha }}
           PUSH_BEFORE: ${{ github.event.before }}
+          RUN_MODE: ${{ inputs.mode }}
         run: |
           case "$MODE" in
             off)
@@ -158,9 +185,15 @@ jobs:
               echo "::notice::baseline-growth: no base commit for event '$EVENT', so H011 did not run"
             fi
           fi
+          rc=0
           if [ -n "$base" ]; then
             echo "header check: baseline growth compared against $base ($EVENT)"
-            python license-tools/license-headers/check_headers.py --root caller --no-growth-against "$base"
+            python license-tools/license-headers/check_headers.py --root caller --no-growth-against "$base" || rc=$?
           else
-            python license-tools/license-headers/check_headers.py --root caller
+            python license-tools/license-headers/check_headers.py --root caller || rc=$?
           fi
+          if [ "$rc" = 1 ] && [ "$RUN_MODE" = report ]; then
+            echo "::warning::per-file header check: findings (listed above). mode=report, so this does not fail the job."
+            exit 0
+          fi
+          exit "$rc"
