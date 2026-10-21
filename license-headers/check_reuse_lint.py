@@ -24,7 +24,9 @@ report is printed); 2 = reuse is missing, the wrong version, or did not run.
 Exit 2 also when a PASS lacks reuse's file counts, or counts fewer files
 than --min-files (anti-vacuity: a verdict over nothing is not a pass), and,
 when reuse runs in this interpreter (no --reuse-cmd), when license-expression
-or boolean.py differs from the version the lock file pins.
+or boolean.py differs from the version the lock file pins. A non-compliance
+exit also needs the complete pinned plain report with no unexpected stderr;
+a crash or an incomplete/ambiguous exit 1 is exit 2.
 
 Run: python3 scripts/check_reuse_lint.py [--root DIR] [--reuse-cmd CMD] [--min-files N]
 Install: pip install --require-hashes -r <that lock file>
@@ -99,6 +101,37 @@ VERSION_RE = re.compile(r"\bversion\s+(\d+(?:\.\d+)+)\s*$")
 SUMMARY_RE = re.compile(r"^\*\s*Files with (copyright|license) information:\s*(\d+)\s*/\s*(\d+)\s*$")
 
 
+NONCOMPLIANT_LINE = (
+    "Unfortunately, your project is not compliant with version "
+    "3.3 of the REUSE Specification :-("
+)
+
+
+def noncompliance_report(stdout: str, stderr: str) -> bool:
+    """Accept the pinned English plain report, not an arbitrary exit 1.
+
+    The pinned formatter writes a complete summary and recommendations to
+    stdout. Unexpected stderr makes the attempted measurement indeterminate.
+    This is output-protocol checking, not proof of an attacker exploit.
+    """
+    if stderr.strip():
+        return False
+    lines = [line.strip() for line in stdout.splitlines()]
+    markers = ("# SUMMARY", NONCOMPLIANT_LINE, "# RECOMMENDATIONS")
+    if any(lines.count(marker) != 1 for marker in markers):
+        return False
+    start, verdict, recommendations = (lines.index(marker) for marker in markers)
+    if not start < verdict < recommendations:
+        return False
+    counts = [match for line in lines[start + 1:verdict]
+              if (match := SUMMARY_RE.fullmatch(line))]
+    if len(counts) != 2 or {match.group(1) for match in counts} != {"copyright", "license"}:
+        return False
+    populations = {int(match.group(3)) for match in counts}
+    return (len(populations) == 1
+            and all(0 <= int(match.group(2)) <= int(match.group(3)) for match in counts))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--root", default=".", help="repository root (default: .)")
@@ -163,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print("check_reuse_lint: reuse " + PINNED + " lint PASS; " + "; ".join(s[2:] for s in summary))
         return 0
-    if lint.returncode == 1:
+    if lint.returncode == 1 and noncompliance_report(lint.stdout, lint.stderr):
         print(out)
         print("check_reuse_lint: reuse lint FAIL (REUSE 3.3 non-compliance, report above)", file=sys.stderr)
         return 1
