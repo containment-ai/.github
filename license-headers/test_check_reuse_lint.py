@@ -54,6 +54,15 @@ PASS_OUT = ("* Files with copyright information: 5 / 5\n"
             "Congratulations! Your project is compliant with version 3.3 of the REUSE Specification :-)")
 
 
+# Complete pinned-format synthetic non-compliance; no repository is scanned.
+FAIL_OUT = ("# SUMMARY\n\n"
+            "* Files with copyright information: 0 / 5\n"
+            "* Files with license information: 5 / 5\n\n"
+            "Unfortunately, your project is not compliant with version "
+            "3.3 of the REUSE Specification :-(\n\n\n"
+            "# RECOMMENDATIONS\n\n* Add the missing copyright information.\n")
+
+
 def isolated_env(home: Path | None = None) -> dict[str, str]:
     """No global/system git config, as in test_check_headers.py: the verdict must
     depend on the fixture only (templateDir hooks, autocrlf and defaultBranch
@@ -127,7 +136,72 @@ class FakeReuse(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_lint_failure_exits_1(self) -> None:
-        self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0", 1, "not compliant")).returncode, 1)
+        self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0", 1, FAIL_OUT)).returncode, 1)
+
+
+    def crashing_reuse(self, prefix: str = "") -> str:
+        p = self.dir / "crashing_reuse.py"
+        p.write_text("import sys\n"
+                     "if '--version' in sys.argv:\n"
+                     "    print('reuse, version 6.2.0'); sys.exit(0)\n"
+                     f"print({prefix!r})\n"
+                     "raise RuntimeError('synthetic REUSE crash')\n", encoding="utf-8")
+        return f"{shlex.quote(sys.executable)} {shlex.quote(str(p))}"
+
+    def gated_reuse(self, mode: str, cmd: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(SCRIPTS / "gate_mode.py"),
+                               "--mode", mode, str(WRAPPER), "--reuse-cmd", cmd],
+                              capture_output=True, text=True)
+
+    def test_child_crash_exit_one_is_not_findings(self) -> None:
+        r = run("--reuse-cmd", self.crashing_reuse())
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("synthetic REUSE crash", r.stderr)
+        self.assertNotIn("lint FAIL (REUSE", r.stderr)
+
+    def test_exit_one_without_output_is_not_findings(self) -> None:
+        self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0", 1)).returncode, 2)
+
+    def test_unknown_exit_one_output_is_not_findings(self) -> None:
+        self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0", 1, "not compliant")).returncode, 2)
+
+    def test_incomplete_noncompliance_report_is_not_findings(self) -> None:
+        for report in (FAIL_OUT.replace("# SUMMARY", ""),
+                       FAIL_OUT.replace("# RECOMMENDATIONS", ""),
+                       FAIL_OUT.replace("* Files with license information: 5 / 5\n", "")):
+            with self.subTest(report=report):
+                self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0", 1, report)).returncode, 2)
+
+    def test_inconsistent_noncompliance_counts_are_not_findings(self) -> None:
+        for report in (FAIL_OUT.replace("license information: 5 / 5", "license information: 5 / 6"),
+                       FAIL_OUT.replace("license information: 5 / 5", "license information: 6 / 5"),
+                       FAIL_OUT.replace("# SUMMARY", "# SUMMARY\n# SUMMARY"),
+                       FAIL_OUT.replace("* Files with license information: 5 / 5", "* Files with license information: 5 / 5\n* Files with license information: 5 / 5")):
+            with self.subTest(report=report):
+                self.assertEqual(run("--reuse-cmd", self.fake("reuse, version 6.2.0", 1, report)).returncode, 2)
+
+    def test_child_crash_after_complete_report_is_not_findings(self) -> None:
+        self.assertEqual(run("--reuse-cmd", self.crashing_reuse(FAIL_OUT)).returncode, 2)
+
+    def test_report_mode_does_not_downgrade_child_crash(self) -> None:
+        r = self.gated_reuse("report", self.crashing_reuse())
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertNotIn("::warning::", r.stdout)
+
+    def test_enforce_mode_still_fails_child_crash(self) -> None:
+        self.assertEqual(self.gated_reuse("enforce", self.crashing_reuse()).returncode, 2)
+
+    def test_complete_noncompliance_is_reported_in_report_mode(self) -> None:
+        r = self.gated_reuse("report", self.fake("reuse, version 6.2.0", 1, FAIL_OUT))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("::warning::", r.stdout)
+
+    def test_complete_noncompliance_still_fails_enforce_mode(self) -> None:
+        self.assertEqual(self.gated_reuse("enforce", self.fake("reuse, version 6.2.0", 1, FAIL_OUT)).returncode, 1)
+
+    def test_noncompliance_does_not_apply_the_pass_population_floor(self) -> None:
+        r = run("--min-files", "10", "--reuse-cmd", self.fake("reuse, version 6.2.0", 1, FAIL_OUT))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     # Anti-vacuity (Claude review of #2445 at 5729be15, W1).
     def test_reuse_lint_pass_without_file_counts_exits_2(self) -> None:
