@@ -24,7 +24,7 @@ Shared licence checks for containment-ai repositories, run by the reusable workf
    years = "2026"                      # first-commit year to now, e.g. "2025-2026"
    holder = "Containment.ai LLC"
    default-expression = "LicenseRef-Containment-Commercial"
-   agpl-ai-use = "d25"                 # or "notice" for AGPL files, if the repository adopts it
+   agpl-ai-use = "notice"              # optional; the default. "d25" keeps the D25 line on AGPL files
    exempt = ["fixtures/**"]            # paths that carry their licence in REUSE.toml
    baseline = "license-headers-baseline.txt"   # optional; generate with --write-baseline
    min-inspected = 100                 # optional anti-vacuity floor; default 1, never 0
@@ -44,6 +44,14 @@ Shared licence checks for containment-ai repositories, run by the reusable workf
    under the exempt globs than `max-exempt` means a new directory matched one (a
    `**/fixtures/**` glob matches that name anywhere). A `.license` sidecar whose file is
    no longer tracked is exit 2.
+
+   The AI-USE line follows the licence `REUSE.toml` assigns the path. A file whose
+   expression names the AGPL (for example `AGPL-3.0-only OR LicenseRef-Containment-Commercial`)
+   carries the notice form, `AI-USE: see AI-POLICY.md — notice to AI agents; does not
+   restrict rights granted by the AGPL`, because under the AGPL option `AI-POLICY.md` is
+   a notice, not an added term (its section 4). Every other first-party file carries
+   the D25 line. A repository that chooses the restrictive line for its AGPL files can
+   set `agpl-ai-use = "d25"`; the check then prints how many files that setting covers.
 
    The baseline excuses one finding code on one file. It only shrinks: an entry that
    no longer matches a finding fails the check. The reusable workflow also passes

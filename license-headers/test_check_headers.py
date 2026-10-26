@@ -51,6 +51,8 @@ agpl-ai-use = "{form}"
 exempt = ["records/**"]
 baseline = "baseline.txt"
 """
+# The same config with no agpl-ai-use key: the checker's default applies.
+CONFIG_DEFAULT_FORM = "".join(l for l in CONFIG.splitlines(True) if not l.startswith("agpl-ai-use"))
 
 REUSE = header(lead="#") + f"""\
 version = 1
@@ -113,7 +115,7 @@ CLEAN = {
 
 
 class Fixture(unittest.TestCase):
-    form = "d25"
+    form: str | None = "d25"  # None: the config omits agpl-ai-use
 
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="check-headers-"))
@@ -124,7 +126,7 @@ class Fixture(unittest.TestCase):
                     "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(self.root),
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                     "GIT_COMMITTER_EMAIL": "t@t"}
-        self.write(".license-headers.toml", CONFIG.format(form=self.form))
+        self.write(".license-headers.toml", CONFIG.format(form=self.form) if self.form else CONFIG_DEFAULT_FORM)
         for rel, text in CLEAN.items():
             self.write(rel, text)
 
@@ -618,6 +620,95 @@ class NoticeForm(Fixture):
         self.write("crates/dual/lib.rs", header(DUAL, ai=NOTICE) + "pub fn f() {}\n")
         self.write("src/main.rs", header(ai=NOTICE) + "fn main() {}\n")
         self.assertFinding("H005", "src/main.rs")
+
+
+class DefaultFormIsNotice(Fixture):
+    """With no agpl-ai-use key, AGPL files take the notice-form line
+    (AI-POLICY.md section 4). Commercial files keep the D25 line."""
+    form = None
+
+    def test_default_config_has_no_form_key(self) -> None:
+        # Guards the arm itself: a config that still names the key would make
+        # every test below exercise the explicit setting, not the default.
+        self.assertNotIn("agpl-ai-use", (self.root / ".license-headers.toml").read_text())
+
+    def test_default_requires_notice_form_on_agpl_files(self) -> None:
+        self.assertFinding("H005", "crates/dual/lib.rs")  # the fixture still carries the D25 line
+
+    def test_default_accepts_notice_form_on_agpl_files(self) -> None:
+        self.write("crates/dual/lib.rs", header(DUAL, ai=NOTICE) + "pub fn f() {}\n")
+        self.assertClean()
+
+    def test_default_accepts_ascii_notice_form(self) -> None:
+        self.write("crates/dual/lib.rs", header(DUAL, ai=NOTICE.replace(" — ", " - ")) + "pub fn f() {}\n")
+        self.assertClean()
+
+    def test_default_applies_to_every_agpl_annotation(self) -> None:
+        self.write("crates/dual/lib.rs", header(DUAL, ai=NOTICE) + "pub fn f() {}\n")
+        self.write("crates/one/a.rs", header(DUAL) + "pub fn a() {}\n")
+        self.assertFinding("H005", "crates/one/a.rs")
+
+    def test_default_keeps_d25_line_on_commercial_files(self) -> None:
+        self.write("crates/dual/lib.rs", header(DUAL, ai=NOTICE) + "pub fn f() {}\n")
+        self.write("src/main.rs", header(ai=NOTICE) + "fn main() {}\n")
+        self.assertFinding("H005", "src/main.rs")
+
+    def test_default_does_not_print_the_d25_override_note(self) -> None:
+        self.write("crates/dual/lib.rs", header(DUAL, ai=NOTICE) + "pub fn f() {}\n")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("held to the D25 AI-USE line", r.stdout)
+
+    def test_default_baseline_header_uses_the_tier_line(self) -> None:
+        # A repository whose default expression is the dual one writes its
+        # baseline header with the notice form, not the D25 line.
+        self.write(".license-headers.toml", CONFIG_DEFAULT_FORM.replace(
+            'default-expression = "LicenseRef-Containment-Commercial"', f'default-expression = "{DUAL}"'))
+        self.write("crates/dual/lib.rs", header(DUAL, ai=NOTICE) + "pub fn f() {}\n")
+        r = self.run_checker("--write-baseline")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        text = (self.root / "baseline.txt").read_text(encoding="utf-8")
+        self.assertIn("# " + NOTICE + "\n", text)
+        self.assertNotIn(AI, text)
+
+
+class ExplicitD25Override(Fixture):
+    """agpl-ai-use = "d25" stays available for a repository that chooses the
+    restrictive line for its AGPL files; the summary counts the AGPL files the
+    setting covers, so the override is never silent."""
+    form = "d25"
+
+    def test_explicit_d25_keeps_d25_line_on_agpl_files(self) -> None:
+        self.assertClean()  # the fixture's dual file carries the D25 line
+
+    def test_explicit_d25_override_is_printed_with_its_count(self) -> None:
+        self.write("crates/one/a.rs", header(DUAL) + "pub fn a() {}\n")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("check_headers: 2 AGPL-licensed file(s) held to the D25 AI-USE line", r.stdout)
+
+    def test_explicit_d25_override_note_is_not_on_stderr(self) -> None:
+        # gate_mode.py reads the LAST stderr line as the findings verdict; the
+        # informational note must not displace it.
+        self.write("src/new.rs", "fn new() {}\n")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("held to the D25", r.stderr)
+        self.assertRegex(r.stderr.strip().splitlines()[-1], r"check_headers: \d+ finding\(s\)")
+
+    def test_third_party_agpl_file_is_not_counted(self) -> None:
+        self.write("REUSE.toml", REUSE + """
+[[annotations]]
+path = "vendor/agpl/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2021 Upstream AGPL Authors"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
+""")
+        self.write("vendor/agpl/x.js", "// SPDX-FileCopyrightText: 2021 Upstream AGPL Authors\n"
+                                       "// SPDX-License-Identifier: AGPL-3.0-or-later\nmodule.exports = 3;\n")
+        r = self.run_checker()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("check_headers: 1 AGPL-licensed file(s) held", r.stdout)
 
 
 class InputErrors(Fixture):
