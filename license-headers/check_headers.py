@@ -20,7 +20,8 @@ three-line header:
 Repository-agnostic. Everything repository-specific comes from two places:
 
   * `.license-headers.toml` at the repository root: years, holder, default
-    expression, the AI-USE form for AGPL files, extra exempt globs, and the
+    expression, the AI-USE form for AGPL files (default: the notice form),
+    extra exempt globs, and the
     path of the baseline file.
   * The repository's own `REUSE.toml`. The EXPECTED licence expression of a
     file is the expression of the LAST REUSE.toml annotation matching it (any
@@ -91,12 +92,26 @@ from pathlib import Path
 CONFIG_NAME = ".license-headers.toml"
 WINDOW = 40  # lines read per file; matches the D25 counter and HEADER-SPEC placement
 
-# Canonical AI-USE texts. D25 is the HEADER-SPEC line 3, used on every tier by
-# default. NOTICE is the notice-only form for AGPL-licensed files; it applies
-# only where a repository's config opts in with agpl-ai-use = "notice", and
-# whether to opt in is that repository's licensing decision, not this script's.
+# Canonical AI-USE texts. D25 is the HEADER-SPEC line 3, the line for every
+# file whose expected expression does not name the AGPL. NOTICE is the
+# notice-only form for AGPL-licensed files (under the AGPL option the policy is
+# a notice, not an added licence term; AI-POLICY.md section 4), and it is the
+# DEFAULT for those files. A repository that chooses the restrictive line for
+# its AGPL files sets agpl-ai-use = "d25" explicitly; the summary then says how
+# many files that override covers, so the override stays visible.
 AI_USE_D25 = "AI-USE: see AI-POLICY.md — no AI training, no AI-assisted rewrite/reimplementation"
 AI_USE_NOTICE = "AI-USE: see AI-POLICY.md — notice to AI agents; does not restrict rights granted by the AGPL"
+AGPL_AI_USE_DEFAULT = "notice"
+
+
+def is_agpl(expression: str) -> bool:
+    """True when a licence expression names the AGPL (any version or suffix)."""
+    return "AGPL" in expression
+
+
+def ai_use_line(expression: str, form: str) -> str:
+    """The canonical AI-USE line for a first-party file with this expected expression."""
+    return AI_USE_NOTICE if (form == "notice" and is_agpl(expression)) else AI_USE_D25
 
 
 def _ascii(text: str) -> str:
@@ -202,6 +217,7 @@ class Report:
     findings: list[tuple[str, str, str]] = field(default_factory=list)  # (code, path, detail)
     checked: int = 0
     third_party: int = 0  # inspected under the third-party rules (no D25 header required)
+    agpl_d25: int = 0  # first-party AGPL files held to the D25 line by agpl-ai-use = "d25"
     skipped: dict[str, int] = field(default_factory=dict)
     third_party_paths: list[str] = field(default_factory=list)
     no_syntax_paths: list[str] = field(default_factory=list)
@@ -333,7 +349,7 @@ def load_config(root: Path) -> Config:
     missing = [k for k in ("years", "holder", "default-expression") if not data.get(k)]
     if missing:
         raise InputError(f"{CONFIG_NAME} lacks {', '.join(missing)}")
-    form = data.get("agpl-ai-use", "d25")
+    form = data.get("agpl-ai-use", AGPL_AI_USE_DEFAULT)
     if form not in ("d25", "notice"):
         raise InputError(f'{CONFIG_NAME}: agpl-ai-use must be "d25" or "notice", got {form!r}')
     exempt = data.get("exempt", [])
@@ -532,7 +548,7 @@ def inspect(lines: list[str], expected: str, third_party: bool, cfg: Config) -> 
     if lics and lics[0][1] != expected:
         found.append(("H004", f"{lics[0][1]!r}, REUSE.toml says {expected!r}"))
     if ais:
-        want = AI_USE_NOTICE if (cfg.agpl_ai_use == "notice" and "AGPL" in expected) else AI_USE_D25
+        want = ai_use_line(expected, cfg.agpl_ai_use)
         if ais[0][1] not in (want, _ascii(want)):
             found.append(("H005", f"{ais[0][1]!r}, expected {want!r}"))
     return found
@@ -598,6 +614,8 @@ def run(root: Path, writing: bool = False) -> tuple[Report, list[tuple[str, str]
         if third_party:
             report.third_party += 1
             report.third_party_paths.append(rel)
+        elif cfg.agpl_ai_use == "d25" and is_agpl(expected):
+            report.agpl_d25 += 1
         for code, detail in inspect(lines, expected, third_party, cfg):
             raw.append((code, rel, detail + source))
     current = {(c, p) for c, p, _ in raw}
@@ -677,7 +695,7 @@ def write_baseline(root: Path, current: list[tuple[str, str]]) -> Path:
     head = (
         "# SPDX-FileCopyrightText: " + f"{cfg.years} {cfg.holder}\n"
         "# SPDX-License-Identifier: " + cfg.default_expression + "\n"
-        "# " + AI_USE_D25 + "\n"
+        "# " + ai_use_line(cfg.default_expression, cfg.agpl_ai_use) + "\n"
         "#\n"
         "# Header-gate baseline (scripts/check_headers.py). One `<code> <path>` per line.\n"
         "# Each entry excuses ONE finding on ONE file; any other finding on that file\n"
@@ -741,6 +759,9 @@ def main(argv: list[str] | None = None) -> int:
     skipped = ", ".join(f"{n} {why}" for why, n in sorted(report.skipped.items()))
     print(f"check_headers: inspected {report.checked} files ({report.third_party} under third-party rules, "
           f"which require no D25 header); not inspected: {skipped or 'none'}")
+    if report.agpl_d25:
+        print(f"check_headers: {report.agpl_d25} AGPL-licensed file(s) held to the D25 AI-USE line by "
+              f'agpl-ai-use = "d25" in {CONFIG_NAME}; the default for AGPL files is the notice form')
     if not report.findings:
         print(f"check_headers: no finding outside the baseline: {report.checked - report.third_party} "
               f"checked against the D25 header rule, {report.third_party} against the third-party rule")

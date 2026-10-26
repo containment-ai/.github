@@ -9,7 +9,9 @@
 years = "2026"
 holder = "Containment.ai LLC"
 default-expression = "LicenseRef-Containment-Commercial"
-agpl-ai-use = "d25"
+# Notice form on AGPL files (the checker's default, stated here explicitly).
+# No file in this repository is AGPL today.
+agpl-ai-use = "notice"
 
 # The organization profile page is rendered on github.com/containment-ai and
 # is annotated in REUSE.toml instead of carrying an inline header.
